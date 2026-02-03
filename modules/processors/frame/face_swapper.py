@@ -33,10 +33,14 @@ IS_APPLE_SILICON = platform.system() == 'Darwin' and platform.machine() == 'arm6
 FRAME_CACHE = deque(maxlen=3)  # Cache for frame reuse
 FACE_DETECTION_CACHE = {}  # Cache face detections
 LAST_DETECTION_TIME = 0
-DETECTION_INTERVAL = 0.033  # ~30 FPS detection rate for live mode
 FRAME_SKIP_COUNTER = 0
 ADAPTIVE_QUALITY = True
 # --- END: Mac M1-M5 Optimizations ---
+
+def get_detection_interval():
+    """Get detection interval from global settings (converts FPS to seconds)."""
+    fps = getattr(modules.globals, 'detection_fps', 30.0)
+    return 1.0 / max(fps, 1.0)  # Prevent division by zero
 
 abs_dir = os.path.dirname(os.path.abspath(__file__))
 models_dir = os.path.join(
@@ -127,6 +131,10 @@ def get_face_swapper() -> Any:
                     model_path,
                     providers=providers_config,
                 )
+                # Check which providers are actually being used
+                if hasattr(FACE_SWAPPER, 'session') and hasattr(FACE_SWAPPER.session, 'get_providers'):
+                    actual_providers = FACE_SWAPPER.session.get_providers()
+                    print(f"[INFO] Face swapper ACTUAL providers: {actual_providers}")
                 print(f"[INFO] Face swapper loaded successfully!")
                 update_status("Face swapper model loaded successfully.", NAME)
             except Exception as e:
@@ -264,41 +272,59 @@ def swap_face(source_face: Face, target_face: Face, temp_frame: Frame) -> Frame:
     return final_swapped_frame
 
 
-# --- START: Mac M1-M5 Optimized Face Detection ---
-def get_faces_optimized(frame: Frame, use_cache: bool = True) -> Optional[List[Face]]:
-    """Optimized face detection for live mode on Apple Silicon"""
+# --- START: Optimized Face Detection with Caching ---
+def get_faces_for_live(frame: Frame) -> Optional[List[Face]]:
+    """
+    Face detection with configurable caching for live mode.
+    Uses detection_fps setting to control detection frequency.
+    Works on ALL platforms (Windows, Mac, Linux).
+    """
     global LAST_DETECTION_TIME, FACE_DETECTION_CACHE
-    
-    if not use_cache or not IS_APPLE_SILICON:
-        # Standard detection
-        if modules.globals.many_faces:
-            return get_many_faces(frame)
-        else:
-            face = get_one_face(frame)
-            return [face] if face else None
-    
-    # Adaptive detection rate for live mode
+
+    # Get detection interval from settings (e.g., 5 FPS = 0.2 seconds between detections)
+    detection_interval = get_detection_interval()
     current_time = time.time()
     time_since_last = current_time - LAST_DETECTION_TIME
-    
-    # Skip detection if too soon (adaptive frame skipping)
-    if time_since_last < DETECTION_INTERVAL and FACE_DETECTION_CACHE:
+
+    # Return cached faces if detection interval hasn't passed
+    if time_since_last < detection_interval and FACE_DETECTION_CACHE.get('faces') is not None:
         return FACE_DETECTION_CACHE.get('faces')
-    
-    # Perform detection
+
+    # Perform new detection
     LAST_DETECTION_TIME = current_time
+
     if modules.globals.many_faces:
         faces = get_many_faces(frame)
     else:
         face = get_one_face(frame)
         faces = [face] if face else None
-    
+
     # Cache results
     FACE_DETECTION_CACHE['faces'] = faces
     FACE_DETECTION_CACHE['timestamp'] = current_time
-    
+
     return faces
-# --- END: Mac M1-M5 Optimized Face Detection ---
+
+
+def get_cached_face():
+    """Get the most recently detected face from cache (for enhancer reuse)."""
+    faces = FACE_DETECTION_CACHE.get('faces')
+    if faces and len(faces) > 0:
+        return faces[0]  # Return first face for single-face mode
+    return None
+
+
+def get_cached_faces():
+    """Get all cached detected faces (for many_faces mode)."""
+    return FACE_DETECTION_CACHE.get('faces')
+
+
+def clear_face_cache():
+    """Clear the face detection cache (call when starting new preview session)."""
+    global FACE_DETECTION_CACHE, LAST_DETECTION_TIME
+    FACE_DETECTION_CACHE = {}
+    LAST_DETECTION_TIME = 0
+# --- END: Optimized Face Detection with Caching ---
 
 # --- START: Helper function for interpolation and sharpening ---
 def apply_post_processing(current_frame: Frame, swapped_face_bboxes: List[np.ndarray]) -> Frame:
@@ -430,6 +456,32 @@ def process_frame(source_face: Face, temp_frame: Frame) -> Frame:
     return final_frame
 
 
+def process_frame_with_target(source_face: Face, target_face: Face, temp_frame: Frame) -> Frame:
+    """
+    OPTIMIZED VERSION - Process frame with pre-detected target face.
+    Skips face detection entirely when target_face is provided.
+    """
+    if source_face is None:
+        return temp_frame
+    if getattr(modules.globals, "opacity", 1.0) == 0:
+        global PREVIOUS_FRAME_RESULT
+        PREVIOUS_FRAME_RESULT = None
+        return temp_frame
+
+    processed_frame = temp_frame
+    swapped_face_bboxes = []
+
+    if target_face:
+        processed_frame = swap_face(source_face, target_face, processed_frame)
+        if hasattr(target_face, "bbox") and target_face.bbox is not None:
+            swapped_face_bboxes.append(target_face.bbox.astype(int))
+
+    # Apply sharpening and interpolation
+    final_frame = apply_post_processing(processed_frame, swapped_face_bboxes)
+
+    return final_frame
+
+
 def process_frame_v2(temp_frame: Frame, temp_frame_path: str = "") -> Frame:
     """Handles complex mapping scenarios (map_faces=True) and live streams."""
     if getattr(modules.globals, "opacity", 1.0) == 0:
@@ -552,6 +604,72 @@ def process_frame_v2(temp_frame: Frame, temp_frame_path: str = "") -> Frame:
     # Apply sharpening and interpolation
     final_frame = apply_post_processing(processed_frame, swapped_face_bboxes)
 
+    return final_frame
+
+
+def process_frame_v2_with_targets(temp_frame: Frame, detected_faces: list) -> Frame:
+    """
+    OPTIMIZED VERSION for map_faces mode - uses pre-detected faces to skip detection.
+    Handles complex mapping scenarios (map_faces=True) for live streams.
+    """
+    if getattr(modules.globals, "opacity", 1.0) == 0:
+        global PREVIOUS_FRAME_RESULT
+        PREVIOUS_FRAME_RESULT = None
+        return temp_frame
+
+    processed_frame = temp_frame
+    swapped_face_bboxes = []
+    source_target_pairs = []
+
+    simple_map = getattr(modules.globals, "simple_map", None)
+
+    # Live stream processing with pre-detected faces
+    if detected_faces:
+        if modules.globals.many_faces:
+            source_face = default_source_face()
+            if source_face:
+                for target_face in detected_faces:
+                    source_target_pairs.append((source_face, target_face))
+        elif simple_map:
+            # Use simple_map (source_faces <-> target_embeddings)
+            source_faces = simple_map.get("source_faces", [])
+            target_embeddings = simple_map.get("target_embeddings", [])
+
+            if source_faces and target_embeddings and len(source_faces) == len(target_embeddings):
+                if len(detected_faces) <= len(target_embeddings):
+                    for detected_face in detected_faces:
+                        if detected_face.normed_embedding is None:
+                            continue
+                        closest_idx, _ = find_closest_centroid(target_embeddings, detected_face.normed_embedding)
+                        if 0 <= closest_idx < len(source_faces):
+                            source_target_pairs.append((source_faces[closest_idx], detected_face))
+                else:
+                    detected_embeddings = [f.normed_embedding for f in detected_faces if f.normed_embedding is not None]
+                    detected_faces_with_embedding = [f for f in detected_faces if f.normed_embedding is not None]
+                    if not detected_embeddings:
+                        return processed_frame
+
+                    for i, target_embedding in enumerate(target_embeddings):
+                        if 0 <= i < len(source_faces):
+                            closest_idx, _ = find_closest_centroid(detected_embeddings, target_embedding)
+                            if 0 <= closest_idx < len(detected_faces_with_embedding):
+                                source_target_pairs.append((source_faces[i], detected_faces_with_embedding[closest_idx]))
+        else:
+            # Fallback: use default source for first detected face
+            source_face = default_source_face()
+            if source_face and len(detected_faces) > 0:
+                source_target_pairs.append((source_face, detected_faces[0]))
+
+    # Perform swaps
+    current_swap_target = processed_frame.copy()
+    for source_face, target_face in source_target_pairs:
+        if source_face and target_face:
+            current_swap_target = swap_face(source_face, target_face, current_swap_target)
+            if target_face is not None and hasattr(target_face, "bbox") and target_face.bbox is not None:
+                swapped_face_bboxes.append(target_face.bbox.astype(int))
+    processed_frame = current_swap_target
+
+    final_frame = apply_post_processing(processed_frame, swapped_face_bboxes)
     return final_frame
 
 

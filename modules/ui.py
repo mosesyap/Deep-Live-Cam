@@ -12,10 +12,20 @@ import json
 import threading
 import queue
 import torch
+
+# Virtual camera support
+try:
+    import pyvirtualcam
+    VIRTUAL_CAM_AVAILABLE = True
+except ImportError:
+    VIRTUAL_CAM_AVAILABLE = False
+    print("[INFO] pyvirtualcam not installed. Virtual camera disabled. Install with: pip install pyvirtualcam")
+
 import modules.globals
 import modules.metadata
 from modules.face_analyser import (
     get_one_face,
+    get_many_faces,
     get_unique_faces_from_target_image,
     get_unique_faces_from_target_video,
     add_blank_map,
@@ -296,6 +306,79 @@ def create_root(start: Callable[[], None], destroy: Callable[[], None]) -> ctk.C
     ctk.CTkCheckBox(enhance_frame, text="FP16 (Faster)", variable=fp16_var,
                     command=lambda: setattr(modules.globals, "use_fp16", fp16_var.get())).pack(anchor="w", pady=2)
 
+    # --- Performance Section ---
+    section_perf = ctk.CTkFrame(sidebar)
+    section_perf.pack(fill="x", padx=5, pady=5)
+
+    ctk.CTkLabel(section_perf, text="Performance", font=("", 14, "bold")).pack(pady=(5, 10))
+
+    perf_frame = ctk.CTkFrame(section_perf, fg_color="transparent")
+    perf_frame.pack(fill="x", padx=10)
+
+    # Detection FPS slider
+    det_fps_frame = ctk.CTkFrame(perf_frame, fg_color="transparent")
+    det_fps_frame.pack(fill="x", pady=2)
+
+    ctk.CTkLabel(det_fps_frame, text="Detection FPS:", width=100, anchor="w").pack(side="left")
+    det_fps_label = ctk.CTkLabel(det_fps_frame, text=f"{int(getattr(modules.globals, 'detection_fps', 30))}", width=30)
+    det_fps_label.pack(side="right")
+
+    def update_det_fps(v):
+        modules.globals.detection_fps = float(v)
+        det_fps_label.configure(text=f"{int(v)}")
+
+    det_fps_slider = ctk.CTkSlider(det_fps_frame, from_=1, to=30, width=100, command=update_det_fps)
+    det_fps_slider.set(getattr(modules.globals, 'detection_fps', 30.0))
+    det_fps_slider.pack(side="left", padx=5)
+
+    # Queue Size slider
+    queue_frame = ctk.CTkFrame(perf_frame, fg_color="transparent")
+    queue_frame.pack(fill="x", pady=2)
+
+    ctk.CTkLabel(queue_frame, text="Queue Size:", width=100, anchor="w").pack(side="left")
+    queue_label = ctk.CTkLabel(queue_frame, text=f"{int(getattr(modules.globals, 'pipeline_queue_size', 6))}", width=30)
+    queue_label.pack(side="right")
+
+    def update_queue_size(v):
+        modules.globals.pipeline_queue_size = int(v)
+        queue_label.configure(text=f"{int(v)}")
+
+    queue_slider = ctk.CTkSlider(queue_frame, from_=2, to=16, number_of_steps=14, width=100, command=update_queue_size)
+    queue_slider.set(getattr(modules.globals, 'pipeline_queue_size', 6))
+    queue_slider.pack(side="left", padx=5)
+
+    # Enhance Skip slider - enhance every Nth frame
+    enhance_skip_frame = ctk.CTkFrame(perf_frame, fg_color="transparent")
+    enhance_skip_frame.pack(fill="x", pady=2)
+
+    ctk.CTkLabel(enhance_skip_frame, text="Enhance 1/N:", width=100, anchor="w").pack(side="left")
+    enhance_skip_label = ctk.CTkLabel(enhance_skip_frame, text=f"{int(getattr(modules.globals, 'enhance_every_n_frames', 1))}", width=30)
+    enhance_skip_label.pack(side="right")
+
+    def update_enhance_skip(v):
+        modules.globals.enhance_every_n_frames = int(v)
+        enhance_skip_label.configure(text=f"{int(v)}")
+
+    enhance_skip_slider = ctk.CTkSlider(enhance_skip_frame, from_=1, to=4, number_of_steps=3, width=100, command=update_enhance_skip)
+    enhance_skip_slider.set(getattr(modules.globals, 'enhance_every_n_frames', 1))
+    enhance_skip_slider.pack(side="left", padx=5)
+
+    # FP16 toggle
+    fp16_frame = ctk.CTkFrame(perf_frame, fg_color="transparent")
+    fp16_frame.pack(fill="x", pady=2)
+
+    def toggle_fp16():
+        modules.globals.use_fp16 = fp16_var.get()
+
+    fp16_var = ctk.BooleanVar(value=getattr(modules.globals, 'use_fp16', True))
+    fp16_checkbox = ctk.CTkCheckBox(fp16_frame, text="FP16 (faster, slightly blurrier)",
+                                     variable=fp16_var, command=toggle_fp16)
+    fp16_checkbox.pack(side="left")
+
+    # Help text
+    ctk.CTkLabel(perf_frame, text="Det: Lower = skip detection\nQueue: Higher = more GPU work\nEnhance 1/N: skip enhance frames\nFP16: restart preview to apply",
+                 font=("", 10), text_color="gray").pack(anchor="w", pady=(5, 2))
+
     # --- Camera Section ---
     section_camera = ctk.CTkFrame(sidebar)
     section_camera.pack(fill="x", padx=5, pady=5)
@@ -322,6 +405,15 @@ def create_root(start: Callable[[], None], destroy: Callable[[], None]) -> ctk.C
     ctk.CTkCheckBox(live_opts, text="Mirror", variable=mirror_var, width=80,
                     command=lambda: (setattr(modules.globals, "live_mirror", mirror_var.get()),
                                     save_switch_states())).pack(side="left")
+
+    # Virtual camera checkbox
+    vcam_var = ctk.BooleanVar(value=modules.globals.virtual_camera_enabled)
+    vcam_checkbox = ctk.CTkCheckBox(live_opts, text="Virtual Cam", variable=vcam_var, width=100,
+                    command=lambda: setattr(modules.globals, "virtual_camera_enabled", vcam_var.get()))
+    vcam_checkbox.pack(side="left", padx=10)
+    if not VIRTUAL_CAM_AVAILABLE:
+        vcam_checkbox.configure(state="disabled")
+        vcam_checkbox.configure(text="Virtual Cam (N/A)")
 
     # --- Output Options Section ---
     section_output = ctk.CTkFrame(sidebar)
@@ -847,6 +939,28 @@ def create_webcam_preview(camera_index: int):
         update_status("Failed to start camera")
         return
 
+    # Initialize virtual camera if enabled
+    virtual_cam = None
+    if VIRTUAL_CAM_AVAILABLE and modules.globals.virtual_camera_enabled:
+        try:
+            # Use OBS Virtual Camera backend on Windows
+            # Try auto-detect backend first, fallback to specific backends
+            try:
+                virtual_cam = pyvirtualcam.Camera(width=PREVIEW_WIDTH, height=PREVIEW_HEIGHT, fps=30)
+            except:
+                # Try OBS specifically
+                virtual_cam = pyvirtualcam.Camera(width=PREVIEW_WIDTH, height=PREVIEW_HEIGHT, fps=30, backend='obs')
+            print(f"[VCAM] Virtual camera started: {virtual_cam.device}")
+            update_status(f"Virtual camera: {virtual_cam.device}")
+        except Exception as e:
+            print(f"[VCAM] Failed to start virtual camera: {e}")
+            print("[VCAM] Troubleshooting:")
+            print("[VCAM]   1. Open OBS Studio → Tools → Start Virtual Camera → Stop → Close OBS")
+            print("[VCAM]   2. Make sure OBS is completely closed")
+            print("[VCAM]   3. Update graphics drivers if needed")
+            update_status(f"Virtual camera failed: {str(e)[:50]}")
+            virtual_cam = None
+
     # Configure preview window
     PREVIEW.geometry(f"{PREVIEW_WIDTH + 20}x{PREVIEW_HEIGHT + 50}")
     preview_label.configure(width=PREVIEW_WIDTH, height=PREVIEW_HEIGHT)
@@ -876,12 +990,22 @@ def create_webcam_preview(camera_index: int):
         'enhance_times': {'total': 0, 'count': 0},
         'running': True,
         'after_id': None,
+        # Face detection optimization state
+        'last_target_face': None,
+        'last_detected_faces': None,  # For map_faces mode (multiple faces)
+        'last_detection_time': 0,
+        'detection_count': 0,
+        'skip_count': 0,
+        # Virtual camera
+        'virtual_cam': virtual_cam,
     }
 
-    # Pipeline queues
-    swap_queue = queue.Queue(maxsize=2)
-    enhance_queue = queue.Queue(maxsize=2)
-    display_queue = queue.Queue(maxsize=2)
+    # Pipeline queues - larger queues keep GPUs fed with work
+    # With small queues, GPUs sit idle waiting for next frame
+    queue_size = getattr(modules.globals, 'pipeline_queue_size', 6)
+    swap_queue = queue.Queue(maxsize=queue_size)
+    enhance_queue = queue.Queue(maxsize=queue_size)
+    display_queue = queue.Queue(maxsize=queue_size)
     shutdown_event = threading.Event()
 
     def swap_worker():
@@ -894,24 +1018,35 @@ def create_webcam_preview(camera_index: int):
                 if frame_data is None:
                     break
 
-                temp_frame, use_map, source_img = frame_data
+                # Unpack frame data - now includes pre-detected faces list
+                temp_frame, use_map, source_img, detected_faces = frame_data
                 t0 = time.perf_counter()
 
                 if swap_processor:
                     if not use_map:
-                        temp_frame = swap_processor.process_frame(source_img, temp_frame)
+                        # Non-map mode: use single face
+                        target_face = detected_faces[0] if detected_faces and len(detected_faces) > 0 else None
+                        if target_face is not None:
+                            temp_frame = swap_processor.process_frame_with_target(source_img, target_face, temp_frame)
+                        else:
+                            temp_frame = swap_processor.process_frame(source_img, temp_frame)
                     else:
-                        temp_frame = swap_processor.process_frame_v2(temp_frame)
+                        # Map mode: use optimized function with pre-detected faces
+                        if detected_faces is not None and len(detected_faces) > 0:
+                            temp_frame = swap_processor.process_frame_v2_with_targets(temp_frame, detected_faces)
+                        else:
+                            temp_frame = swap_processor.process_frame_v2(temp_frame)
 
                 state['swap_times']['total'] += time.perf_counter() - t0
                 state['swap_times']['count'] += 1
 
                 try:
-                    enhance_queue.put_nowait(temp_frame)
+                    # Pass detected_faces to enhance worker
+                    enhance_queue.put_nowait((temp_frame, detected_faces))
                 except queue.Full:
                     try:
                         enhance_queue.get_nowait()
-                        enhance_queue.put_nowait(temp_frame)
+                        enhance_queue.put_nowait((temp_frame, detected_faces))
                     except:
                         pass
             except queue.Empty:
@@ -923,19 +1058,37 @@ def create_webcam_preview(camera_index: int):
         if torch.cuda.is_available() and torch.cuda.device_count() > 1:
             torch.cuda.set_device(1)
 
+        enhance_frame_count = 0
+
         while not shutdown_event.is_set():
             try:
-                temp_frame = enhance_queue.get(timeout=0.05)
-                if temp_frame is None:
+                frame_data = enhance_queue.get(timeout=0.05)
+                if frame_data is None:
                     break
 
+                # Unpack - now receives detected_faces list from swap worker
+                temp_frame, detected_faces = frame_data
                 t0 = time.perf_counter()
 
-                if enhance_processor and modules.globals.fp_ui.get("face_enhancer", False):
+                # Check if we should enhance this frame or skip
+                enhance_n = getattr(modules.globals, 'enhance_every_n_frames', 1)
+                should_enhance = (enhance_frame_count % max(enhance_n, 1) == 0)
+                enhance_frame_count += 1
+
+                if should_enhance and enhance_processor and modules.globals.fp_ui.get("face_enhancer", False):
                     if not modules.globals.map_faces:
-                        temp_frame = enhance_processor.process_frame(None, temp_frame)
+                        # Non-map mode: use single face
+                        target_face = detected_faces[0] if detected_faces and len(detected_faces) > 0 else None
+                        if target_face is not None:
+                            temp_frame = enhance_processor.process_frame_with_target(temp_frame, target_face)
+                        else:
+                            temp_frame = enhance_processor.process_frame(None, temp_frame)
                     else:
-                        temp_frame = enhance_processor.process_frame_v2(temp_frame)
+                        # Map mode: enhance all pre-detected faces
+                        if detected_faces is not None and len(detected_faces) > 0:
+                            temp_frame = enhance_processor.process_frame_v2_with_targets(temp_frame, detected_faces)
+                        else:
+                            temp_frame = enhance_processor.process_frame_v2(temp_frame)
 
                 state['enhance_times']['total'] += time.perf_counter() - t0
                 state['enhance_times']['count'] += 1
@@ -983,13 +1136,46 @@ def create_webcam_preview(camera_index: int):
         if state['source_image'] is None and modules.globals.source_path:
             state['source_image'] = get_one_face(cv2.imread(modules.globals.source_path))
 
-        # Submit frame to processing pipeline
+        # Face detection with configurable frame skipping
+        # Works for both map_faces and non-map_faces modes
+        detected_faces = None  # Will hold list of faces (or single face for non-map mode)
+        current_time = time.time()
+        det_fps = getattr(modules.globals, 'detection_fps', 30.0)
+        detection_interval = 1.0 / max(det_fps, 1.0)
+        time_since_detection = current_time - state['last_detection_time']
+
+        if time_since_detection >= detection_interval:
+            # Time to detect - do face detection
+            if modules.globals.map_faces:
+                # Map mode: detect all faces
+                faces = get_many_faces(temp_frame)
+                if faces is not None and len(faces) > 0:
+                    state['last_detected_faces'] = faces
+            else:
+                # Non-map mode: detect single face
+                face = get_one_face(temp_frame)
+                if face is not None:
+                    state['last_target_face'] = face
+            state['last_detection_time'] = current_time
+            state['detection_count'] += 1
+        else:
+            # Reuse last detected faces (skip detection)
+            state['skip_count'] += 1
+
+        # Get cached faces for pipeline
+        if modules.globals.map_faces:
+            detected_faces = state.get('last_detected_faces', None)
+        else:
+            single_face = state.get('last_target_face', None)
+            detected_faces = [single_face] if single_face is not None else None
+
+        # Submit frame to processing pipeline with pre-detected faces
         try:
-            swap_queue.put_nowait((temp_frame, modules.globals.map_faces, state['source_image']))
+            swap_queue.put_nowait((temp_frame, modules.globals.map_faces, state['source_image'], detected_faces))
         except queue.Full:
             try:
                 swap_queue.get_nowait()
-                swap_queue.put_nowait((temp_frame, modules.globals.map_faces, state['source_image']))
+                swap_queue.put_nowait((temp_frame, modules.globals.map_faces, state['source_image'], detected_faces))
             except:
                 pass
 
@@ -1018,20 +1204,42 @@ def create_webcam_preview(camera_index: int):
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
         # Efficient display update
-        rgb_frame = display_frame[:, :, ::-1].copy()  # Ensure contiguous array
+        rgb_frame = display_frame[:, :, ::-1].copy()  # Ensure contiguous array (BGR to RGB)
         image = Image.fromarray(rgb_frame)
         current_ctk_image[0] = ctk.CTkImage(light_image=image, size=(display_frame.shape[1], display_frame.shape[0]))
         preview_label.configure(image=current_ctk_image[0])
+
+        # Send to virtual camera if enabled
+        if state['virtual_cam'] is not None:
+            try:
+                # Virtual cam expects RGB, we already have rgb_frame
+                # Resize if needed to match virtual cam dimensions
+                vcam = state['virtual_cam']
+                if rgb_frame.shape[1] != vcam.width or rgb_frame.shape[0] != vcam.height:
+                    vcam_frame = cv2.resize(rgb_frame, (vcam.width, vcam.height))
+                else:
+                    vcam_frame = rgb_frame
+                vcam.send(vcam_frame)
+                vcam.sleep_until_next_frame()
+            except Exception as e:
+                pass  # Silently ignore virtual cam errors to not spam logs
 
         # Debug output (less frequent)
         state['debug_count'] += 1
         if state['debug_count'] >= 60:  # Every ~2 seconds at 30fps
             avg_swap = (state['swap_times']['total'] / max(state['swap_times']['count'], 1)) * 1000
             avg_enhance = (state['enhance_times']['total'] / max(state['enhance_times']['count'], 1)) * 1000
-            print(f"[TIMING] Swap: {avg_swap:.1f}ms, Enhance: {avg_enhance:.1f}ms, FPS: {state['processed_fps']:.1f}")
+            det_fps = getattr(modules.globals, 'detection_fps', 30.0)
+            total_frames = state['detection_count'] + state['skip_count']
+            skip_pct = (state['skip_count'] / max(total_frames, 1)) * 100
+            # Queue depths help identify bottlenecks: empty=starved, full=blocked
+            q_depths = f"Q[{swap_queue.qsize()}/{enhance_queue.qsize()}/{display_queue.qsize()}]"
+            print(f"[TIMING] Swap: {avg_swap:.1f}ms, Enhance: {avg_enhance:.1f}ms, FPS: {state['processed_fps']:.1f} | {q_depths} Det@{det_fps:.0f}fps, Skip: {skip_pct:.0f}%")
             state['debug_count'] = 0
             state['swap_times'] = {'total': 0, 'count': 0}
             state['enhance_times'] = {'total': 0, 'count': 0}
+            state['detection_count'] = 0
+            state['skip_count'] = 0
 
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -1054,6 +1262,16 @@ def create_webcam_preview(camera_index: int):
         swap_thread.join(timeout=1.0)
         enhance_thread.join(timeout=1.0)
         cap.release()
+
+        # Close virtual camera
+        if state['virtual_cam'] is not None:
+            try:
+                state['virtual_cam'].close()
+                print("[VCAM] Virtual camera closed")
+            except:
+                pass
+            state['virtual_cam'] = None
+
         PREVIEW.withdraw()
 
     def on_preview_close():

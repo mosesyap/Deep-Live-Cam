@@ -756,4 +756,26 @@ def process_frame_v2(temp_frame: Frame) -> Frame:
         temp_frame = enhance_face(temp_frame, face=target_face)
     return temp_frame
 
+
+def process_frame_with_target(temp_frame: Frame, target_face: Face) -> Frame:
+    """
+    OPTIMIZED VERSION - Process frame with pre-detected target face.
+    Skips face detection entirely when target_face is provided.
+    """
+    if target_face:
+        temp_frame = enhance_face(temp_frame, face=target_face)
+    return temp_frame
+
+
+def process_frame_v2_with_targets(temp_frame: Frame, detected_faces: list) -> Frame:
+    """
+    OPTIMIZED VERSION for map_faces mode - enhance multiple pre-detected faces.
+    Skips face detection entirely when faces are provided.
+    """
+    if detected_faces:
+        for face in detected_faces:
+            if face is not None:
+                temp_frame = enhance_face(temp_frame, face=face)
+    return temp_frame
+
 # --- END OF FILE face_enhancer.py ---

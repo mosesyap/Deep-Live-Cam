@@ -41,6 +41,7 @@ live_resizable: bool = True
 camera_input_combobox: Any | None = None # Placeholder for UI element if needed
 webcam_preview_running: bool = False
 show_fps: bool = False
+virtual_camera_enabled: bool = False  # Output to virtual camera for video call apps
 
 # System Configuration
 max_memory: int | None = None        # Memory limit in GB? (Needs clarification)
@@ -75,5 +76,23 @@ mask_size: float = 1.0             # Expansion factor for upper lip mask (relati
 enable_interpolation: bool = True # Toggle temporal smoothing
 interpolation_weight: float = 0  # Blend weight for current frame (0.0-1.0). Lower=smoother.
 # --- END: Added for Frame Interpolation ---
+
+# --- START: Performance Optimization Settings ---
+# Face detection frequency in live mode (detections per second)
+# Higher = more accurate tracking but slower, Lower = faster but may lose faces briefly
+# Recommended: 5-10 for live mode (faces don't change position that fast)
+detection_fps: float = 30.0  # Default 30 FPS (original behavior), try 5-10 for speed
+
+# Reuse face data from swapper in enhancer (avoids redundant face detection)
+reuse_face_embedding: bool = False  # Default False (original behavior), True = faster
+
+# Pipeline queue depth for webcam live mode
+# Larger = smoother but more latency, Smaller = less latency but may drop frames
+pipeline_queue_size: int = 6  # Increased from 2 to keep GPUs better fed
+
+# Enhance frame skip - enhance every Nth frame, reuse result for others
+# 1 = enhance every frame (original), 2 = every 2nd frame (2x faster), etc.
+enhance_every_n_frames: int = 1
+# --- END: Performance Optimization Settings ---
 
 # --- END OF FILE globals.py ---
