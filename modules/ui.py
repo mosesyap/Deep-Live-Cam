@@ -1,9 +1,11 @@
+# --- Deep Live Cam UI - Redesigned ---
+
 import os
 import webbrowser
 import customtkinter as ctk
 from typing import Callable, Tuple
 import cv2
-from cv2_enumerate_cameras import enumerate_cameras  # Add this import
+from cv2_enumerate_cameras import enumerate_cameras
 from PIL import Image, ImageOps
 import time
 import json
@@ -36,39 +38,20 @@ import platform
 if platform.system() == "Windows":
     from pygrabber.dshow_graph import FilterGraph
 
+# Global references
 ROOT = None
+PREVIEW = None
 POPUP = None
 POPUP_LIVE = None
-ROOT_HEIGHT = 800
-ROOT_WIDTH = 600
 
-PREVIEW = None
-PREVIEW_MAX_HEIGHT = 700
-PREVIEW_MAX_WIDTH = 1200
-PREVIEW_DEFAULT_WIDTH = 960
-PREVIEW_DEFAULT_HEIGHT = 540
+# Sizing
+ROOT_WIDTH = 1000
+ROOT_HEIGHT = 700
+SIDEBAR_WIDTH = 320
+PREVIEW_MIN_WIDTH = 640
+PREVIEW_MIN_HEIGHT = 480
 
-POPUP_WIDTH = 750
-POPUP_HEIGHT = 810
-POPUP_SCROLL_WIDTH = (740,)
-POPUP_SCROLL_HEIGHT = 700
-
-POPUP_LIVE_WIDTH = 900
-POPUP_LIVE_HEIGHT = 820
-POPUP_LIVE_SCROLL_WIDTH = (890,)
-POPUP_LIVE_SCROLL_HEIGHT = 700
-
-MAPPER_PREVIEW_MAX_HEIGHT = 100
-MAPPER_PREVIEW_MAX_WIDTH = 100
-
-DEFAULT_BUTTON_WIDTH = 200
-DEFAULT_BUTTON_HEIGHT = 40
-
-RECENT_DIRECTORY_SOURCE = None
-RECENT_DIRECTORY_TARGET = None
-RECENT_DIRECTORY_OUTPUT = None
-
-_ = None
+# Preview references
 preview_label = None
 preview_slider = None
 source_label = None
@@ -80,6 +63,11 @@ source_label_dict = {}
 source_label_dict_live = {}
 target_label_dict_live = {}
 
+RECENT_DIRECTORY_SOURCE = None
+RECENT_DIRECTORY_TARGET = None
+RECENT_DIRECTORY_OUTPUT = None
+
+_ = None
 img_ft, vid_ft = modules.globals.file_types
 
 
@@ -132,401 +120,278 @@ def load_switch_states():
         modules.globals.fp_ui = switch_states.get("fp_ui", {"face_enhancer": False})
         modules.globals.show_fps = switch_states.get("show_fps", False)
         modules.globals.mouth_mask = switch_states.get("mouth_mask", False)
-        modules.globals.show_mouth_mask_box = switch_states.get(
-            "show_mouth_mask_box", False
-        )
+        modules.globals.show_mouth_mask_box = switch_states.get("show_mouth_mask_box", False)
     except FileNotFoundError:
-        # If the file doesn't exist, use default values
         pass
 
 
 def create_root(start: Callable[[], None], destroy: Callable[[], None]) -> ctk.CTk:
-    global source_label, target_label, status_label, show_fps_switch
+    global source_label, target_label, status_label
 
     load_switch_states()
 
     ctk.deactivate_automatic_dpi_awareness()
-    ctk.set_appearance_mode("system")
+    ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme(resolve_relative_path("ui.json"))
 
     root = ctk.CTk()
-    root.minsize(ROOT_WIDTH, ROOT_HEIGHT)
-    root.title(
-        f"{modules.metadata.name} {modules.metadata.version} {modules.metadata.edition}"
-    )
-    root.configure()
+    root.title(f"{modules.metadata.name} {modules.metadata.version} {modules.metadata.edition}")
+    root.geometry(f"{ROOT_WIDTH}x{ROOT_HEIGHT}")
+    root.minsize(800, 600)
     root.protocol("WM_DELETE_WINDOW", lambda: destroy())
 
-    source_label = ctk.CTkLabel(root, text=None)
-    source_label.place(relx=0.1, rely=0.05, relwidth=0.275, relheight=0.225)
+    # Configure grid weights
+    root.grid_columnconfigure(0, weight=0, minsize=SIDEBAR_WIDTH)  # Sidebar
+    root.grid_columnconfigure(1, weight=1)  # Main preview area
+    root.grid_rowconfigure(0, weight=1)
 
-    target_label = ctk.CTkLabel(root, text=None)
-    target_label.place(relx=0.6, rely=0.05, relwidth=0.275, relheight=0.225)
+    # === LEFT SIDEBAR ===
+    sidebar = ctk.CTkScrollableFrame(root, width=SIDEBAR_WIDTH - 20)
+    sidebar.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
-    select_face_button = ctk.CTkButton(
-        root, text=_("Select a face"), cursor="hand2", command=lambda: select_source_path()
-    )
-    select_face_button.place(relx=0.1, rely=0.30, relwidth=0.3, relheight=0.1)
+    # --- Source/Target Section ---
+    section_source = ctk.CTkFrame(sidebar)
+    section_source.pack(fill="x", padx=5, pady=5)
 
-    swap_faces_button = ctk.CTkButton(
-        root, text="↔", cursor="hand2", command=lambda: swap_faces_paths()
-    )
-    swap_faces_button.place(relx=0.45, rely=0.30, relwidth=0.1, relheight=0.1)
+    ctk.CTkLabel(section_source, text="Source & Target", font=("", 14, "bold")).pack(pady=(5, 10))
 
-    select_target_button = ctk.CTkButton(
-        root,
-        text=_("Select a target"),
-        cursor="hand2",
-        command=lambda: select_target_path(),
-    )
-    select_target_button.place(relx=0.6, rely=0.30, relwidth=0.3, relheight=0.1)
+    # Source/Target images frame
+    images_frame = ctk.CTkFrame(section_source, fg_color="transparent")
+    images_frame.pack(fill="x", padx=5)
 
-    keep_fps_value = ctk.BooleanVar(value=modules.globals.keep_fps)
-    keep_fps_checkbox = ctk.CTkSwitch(
-        root,
-        text=_("Keep fps"),
-        variable=keep_fps_value,
-        cursor="hand2",
-        command=lambda: (
-            setattr(modules.globals, "keep_fps", keep_fps_value.get()),
-            save_switch_states(),
-        ),
-    )
-    keep_fps_checkbox.place(relx=0.1, rely=0.5)
+    # Source
+    source_frame = ctk.CTkFrame(images_frame)
+    source_frame.pack(side="left", expand=True, fill="both", padx=2)
+    source_label = ctk.CTkLabel(source_frame, text="No Source", width=120, height=120)
+    source_label.pack(pady=5)
+    ctk.CTkButton(source_frame, text="Select Face", width=120, height=28,
+                  command=select_source_path).pack(pady=5)
 
-    keep_frames_value = ctk.BooleanVar(value=modules.globals.keep_frames)
-    keep_frames_switch = ctk.CTkSwitch(
-        root,
-        text=_("Keep frames"),
-        variable=keep_frames_value,
-        cursor="hand2",
-        command=lambda: (
-            setattr(modules.globals, "keep_frames", keep_frames_value.get()),
-            save_switch_states(),
-        ),
-    )
-    keep_frames_switch.place(relx=0.1, rely=0.55)
+    # Swap button
+    ctk.CTkButton(images_frame, text="⇄", width=30, height=30,
+                  command=swap_faces_paths).pack(side="left", padx=5)
 
-    enhancer_value = ctk.BooleanVar(value=modules.globals.fp_ui["face_enhancer"])
-    enhancer_switch = ctk.CTkSwitch(
-        root,
-        text=_("Face Enhancer"),
-        variable=enhancer_value,
-        cursor="hand2",
-        command=lambda: (
-            update_tumbler("face_enhancer", enhancer_value.get()),
-            save_switch_states(),
-        ),
-    )
-    enhancer_switch.place(relx=0.1, rely=0.6)
+    # Target
+    target_frame = ctk.CTkFrame(images_frame)
+    target_frame.pack(side="left", expand=True, fill="both", padx=2)
+    target_label = ctk.CTkLabel(target_frame, text="No Target", width=120, height=120)
+    target_label.pack(pady=5)
+    ctk.CTkButton(target_frame, text="Select Target", width=120, height=28,
+                  command=select_target_path).pack(pady=5)
 
-    # Enhancer type selector
-    # GFPGAN_ONNX ~80-120ms (FaceFusion's default), CodeFormer ~80-120ms
-    # GFPGAN ~230ms (PyTorch), GPEN ~50-100ms (ONNX), Fast ~5ms (CV-based)
-    def update_enhancer_type(choice):
-        type_map = {
-            "GFPGAN_ONNX": "gfpgan_onnx",
-            "CodeFormer": "codeformer",
-            "GFPGAN": "gfpgan",
-            "GPEN": "gpen",
-            "Fast": "fast",
-            "None": "none",
-        }
-        modules.globals.enhancer_type = type_map.get(choice, "gfpgan_onnx")
-        print(f"[UI] Enhancer type set to: {modules.globals.enhancer_type}")
+    # --- Processing Options Section ---
+    section_process = ctk.CTkFrame(sidebar)
+    section_process.pack(fill="x", padx=5, pady=5)
 
-    enhancer_type_label = ctk.CTkLabel(root, text="Enhancer:")
-    enhancer_type_label.place(relx=0.1, rely=0.65)
+    ctk.CTkLabel(section_process, text="Processing", font=("", 14, "bold")).pack(pady=(5, 10))
 
-    enhancer_type_dropdown = ctk.CTkOptionMenu(
-        root,
-        values=["GFPGAN_ONNX", "CodeFormer", "GFPGAN", "GPEN", "Fast", "None"],
-        command=update_enhancer_type,
-    )
-    # Set initial value based on globals
-    current_type = getattr(modules.globals, 'enhancer_type', 'gfpgan_onnx')
-    type_display_map = {
-        "gfpgan_onnx": "GFPGAN_ONNX",
-        "codeformer": "CodeFormer",
-        "gfpgan": "GFPGAN",
-        "gpen": "GPEN",
-        "fast": "Fast",
-        "none": "None",
-    }
-    enhancer_type_dropdown.set(type_display_map.get(current_type, "GFPGAN_ONNX"))
-    enhancer_type_dropdown.place(relx=0.22, rely=0.65, relwidth=0.2)
+    options_frame = ctk.CTkFrame(section_process, fg_color="transparent")
+    options_frame.pack(fill="x", padx=10)
 
-    # Blend slider for face enhancement (0.0-1.0)
-    def update_blend(value):
-        modules.globals.enhancer_blend = float(value)
+    # Row 1
+    row1 = ctk.CTkFrame(options_frame, fg_color="transparent")
+    row1.pack(fill="x", pady=2)
 
-    blend_label = ctk.CTkLabel(root, text="Blend:")
-    blend_label.place(relx=0.44, rely=0.65)
+    many_faces_var = ctk.BooleanVar(value=modules.globals.many_faces)
+    ctk.CTkCheckBox(row1, text="Many Faces", variable=many_faces_var, width=130,
+                    command=lambda: (setattr(modules.globals, "many_faces", many_faces_var.get()),
+                                    save_switch_states())).pack(side="left")
 
-    blend_slider = ctk.CTkSlider(
-        root,
-        from_=0.0,
-        to=1.0,
-        number_of_steps=20,
-        command=update_blend,
-    )
-    blend_slider.set(getattr(modules.globals, 'enhancer_blend', 0.8))
-    blend_slider.place(relx=0.52, rely=0.65, relwidth=0.15)
+    map_faces_var = ctk.BooleanVar(value=modules.globals.map_faces)
+    ctk.CTkCheckBox(row1, text="Map Faces", variable=map_faces_var, width=130,
+                    command=lambda: (setattr(modules.globals, "map_faces", map_faces_var.get()),
+                                    save_switch_states(),
+                                    close_mapper_window() if not map_faces_var.get() else None)).pack(side="left")
 
-    # FP16 toggle for faster inference (requires restart to take effect)
-    fp16_value = ctk.BooleanVar(value=getattr(modules.globals, 'use_fp16', True))
-    fp16_switch = ctk.CTkSwitch(
-        root,
-        text="FP16",
-        variable=fp16_value,
-        cursor="hand2",
-        command=lambda: setattr(modules.globals, "use_fp16", fp16_value.get()),
-    )
-    fp16_switch.place(relx=0.7, rely=0.65)
-
-    keep_audio_value = ctk.BooleanVar(value=modules.globals.keep_audio)
-    keep_audio_switch = ctk.CTkSwitch(
-        root,
-        text=_("Keep audio"),
-        variable=keep_audio_value,
-        cursor="hand2",
-        command=lambda: (
-            setattr(modules.globals, "keep_audio", keep_audio_value.get()),
-            save_switch_states(),
-        ),
-    )
-    keep_audio_switch.place(relx=0.6, rely=0.5)
-
-    many_faces_value = ctk.BooleanVar(value=modules.globals.many_faces)
-    many_faces_switch = ctk.CTkSwitch(
-        root,
-        text=_("Many faces"),
-        variable=many_faces_value,
-        cursor="hand2",
-        command=lambda: (
-            setattr(modules.globals, "many_faces", many_faces_value.get()),
-            save_switch_states(),
-        ),
-    )
-    many_faces_switch.place(relx=0.6, rely=0.55)
-
-    color_correction_value = ctk.BooleanVar(value=modules.globals.color_correction)
-    color_correction_switch = ctk.CTkSwitch(
-        root,
-        text=_("Fix Blueish Cam"),
-        variable=color_correction_value,
-        cursor="hand2",
-        command=lambda: (
-            setattr(modules.globals, "color_correction", color_correction_value.get()),
-            save_switch_states(),
-        ),
-    )
-    color_correction_switch.place(relx=0.6, rely=0.6)
-
-    #    nsfw_value = ctk.BooleanVar(value=modules.globals.nsfw_filter)
-    #    nsfw_switch = ctk.CTkSwitch(root, text='NSFW filter', variable=nsfw_value, cursor='hand2', command=lambda: setattr(modules.globals, 'nsfw_filter', nsfw_value.get()))
-    #    nsfw_switch.place(relx=0.6, rely=0.7)
-
-    map_faces = ctk.BooleanVar(value=modules.globals.map_faces)
-    map_faces_switch = ctk.CTkSwitch(
-        root,
-        text=_("Map faces"),
-        variable=map_faces,
-        cursor="hand2",
-        command=lambda: (
-            setattr(modules.globals, "map_faces", map_faces.get()),
-            save_switch_states(),
-            close_mapper_window() if not map_faces.get() else None
-        ),
-    )
-    map_faces_switch.place(relx=0.1, rely=0.70)
-
-    poisson_blend_value = ctk.BooleanVar(value=modules.globals.poisson_blend)
-    poisson_blend_switch = ctk.CTkSwitch(
-        root,
-        text=_("Poisson Blend"),
-        variable=poisson_blend_value,
-        cursor="hand2",
-        command=lambda: (
-            setattr(modules.globals, "poisson_blend", poisson_blend_value.get()),
-            save_switch_states(),
-        ),
-    )
-    poisson_blend_switch.place(relx=0.1, rely=0.75)
-
-    show_fps_value = ctk.BooleanVar(value=modules.globals.show_fps)
-    show_fps_switch = ctk.CTkSwitch(
-        root,
-        text=_("Show FPS"),
-        variable=show_fps_value,
-        cursor="hand2",
-        command=lambda: (
-            setattr(modules.globals, "show_fps", show_fps_value.get()),
-            save_switch_states(),
-        ),
-    )
-    show_fps_switch.place(relx=0.6, rely=0.65)
+    # Row 2
+    row2 = ctk.CTkFrame(options_frame, fg_color="transparent")
+    row2.pack(fill="x", pady=2)
 
     mouth_mask_var = ctk.BooleanVar(value=modules.globals.mouth_mask)
-    mouth_mask_switch = ctk.CTkSwitch(
-        root,
-        text=_("Mouth Mask"),
-        variable=mouth_mask_var,
-        cursor="hand2",
-        command=lambda: setattr(modules.globals, "mouth_mask", mouth_mask_var.get()),
+    ctk.CTkCheckBox(row2, text="Mouth Mask", variable=mouth_mask_var, width=130,
+                    command=lambda: setattr(modules.globals, "mouth_mask", mouth_mask_var.get())).pack(side="left")
+
+    poisson_var = ctk.BooleanVar(value=modules.globals.poisson_blend)
+    ctk.CTkCheckBox(row2, text="Poisson Blend", variable=poisson_var, width=130,
+                    command=lambda: (setattr(modules.globals, "poisson_blend", poisson_var.get()),
+                                    save_switch_states())).pack(side="left")
+
+    # Row 3
+    row3 = ctk.CTkFrame(options_frame, fg_color="transparent")
+    row3.pack(fill="x", pady=2)
+
+    color_fix_var = ctk.BooleanVar(value=modules.globals.color_correction)
+    ctk.CTkCheckBox(row3, text="Fix Blue Cam", variable=color_fix_var, width=130,
+                    command=lambda: (setattr(modules.globals, "color_correction", color_fix_var.get()),
+                                    save_switch_states())).pack(side="left")
+
+    show_fps_var = ctk.BooleanVar(value=modules.globals.show_fps)
+    ctk.CTkCheckBox(row3, text="Show FPS", variable=show_fps_var, width=130,
+                    command=lambda: (setattr(modules.globals, "show_fps", show_fps_var.get()),
+                                    save_switch_states())).pack(side="left")
+
+    # Sliders
+    sliders_frame = ctk.CTkFrame(options_frame, fg_color="transparent")
+    sliders_frame.pack(fill="x", pady=(10, 5))
+
+    # Transparency
+    ctk.CTkLabel(sliders_frame, text="Opacity:", width=70, anchor="w").grid(row=0, column=0, sticky="w")
+    opacity_slider = ctk.CTkSlider(sliders_frame, from_=0, to=1, width=180,
+                                   command=lambda v: setattr(modules.globals, "opacity", float(v)))
+    opacity_slider.set(getattr(modules.globals, 'opacity', 1.0))
+    opacity_slider.grid(row=0, column=1, padx=5, pady=2)
+
+    # Sharpness
+    ctk.CTkLabel(sliders_frame, text="Sharpness:", width=70, anchor="w").grid(row=1, column=0, sticky="w")
+    sharpness_slider = ctk.CTkSlider(sliders_frame, from_=0, to=5, width=180,
+                                     command=lambda v: setattr(modules.globals, "sharpness", float(v)))
+    sharpness_slider.set(getattr(modules.globals, 'sharpness', 0.0))
+    sharpness_slider.grid(row=1, column=1, padx=5, pady=2)
+
+    # --- Enhancement Section ---
+    section_enhance = ctk.CTkFrame(sidebar)
+    section_enhance.pack(fill="x", padx=5, pady=5)
+
+    ctk.CTkLabel(section_enhance, text="Face Enhancement", font=("", 14, "bold")).pack(pady=(5, 10))
+
+    enhance_frame = ctk.CTkFrame(section_enhance, fg_color="transparent")
+    enhance_frame.pack(fill="x", padx=10)
+
+    # Enable switch
+    enhancer_var = ctk.BooleanVar(value=modules.globals.fp_ui.get("face_enhancer", False))
+    ctk.CTkCheckBox(enhance_frame, text="Enable Enhancement", variable=enhancer_var,
+                    command=lambda: (update_tumbler("face_enhancer", enhancer_var.get()),
+                                    save_switch_states())).pack(anchor="w", pady=2)
+
+    # Enhancer type dropdown
+    type_frame = ctk.CTkFrame(enhance_frame, fg_color="transparent")
+    type_frame.pack(fill="x", pady=5)
+
+    ctk.CTkLabel(type_frame, text="Type:", width=50, anchor="w").pack(side="left")
+
+    type_map = {"gfpgan_onnx": "GFPGAN_ONNX", "codeformer": "CodeFormer", "gfpgan": "GFPGAN",
+                "gpen": "GPEN", "fast": "Fast", "none": "None"}
+    type_map_rev = {v: k for k, v in type_map.items()}
+
+    enhancer_dropdown = ctk.CTkOptionMenu(
+        type_frame, width=150,
+        values=["GFPGAN_ONNX", "CodeFormer", "GFPGAN", "GPEN", "Fast", "None"],
+        command=lambda v: setattr(modules.globals, "enhancer_type", type_map_rev.get(v, "gfpgan_onnx"))
     )
-    mouth_mask_switch.place(relx=0.1, rely=0.45)
+    enhancer_dropdown.set(type_map.get(getattr(modules.globals, 'enhancer_type', 'gfpgan_onnx'), "GFPGAN_ONNX"))
+    enhancer_dropdown.pack(side="left", padx=5)
 
-    show_mouth_mask_box_var = ctk.BooleanVar(value=modules.globals.show_mouth_mask_box)
-    show_mouth_mask_box_switch = ctk.CTkSwitch(
-        root,
-        text=_("Show Mouth Mask Box"),
-        variable=show_mouth_mask_box_var,
-        cursor="hand2",
-        command=lambda: setattr(
-            modules.globals, "show_mouth_mask_box", show_mouth_mask_box_var.get()
-        ),
-    )
-    show_mouth_mask_box_switch.place(relx=0.6, rely=0.45)
+    # Blend slider
+    blend_frame = ctk.CTkFrame(enhance_frame, fg_color="transparent")
+    blend_frame.pack(fill="x", pady=2)
 
-    start_button = ctk.CTkButton(
-        root, text=_("Start"), cursor="hand2", command=lambda: analyze_target(start, root)
-    )
-    start_button.place(relx=0.15, rely=0.86, relwidth=0.2, relheight=0.05)
+    ctk.CTkLabel(blend_frame, text="Blend:", width=50, anchor="w").pack(side="left")
+    blend_slider = ctk.CTkSlider(blend_frame, from_=0, to=1, width=150,
+                                 command=lambda v: setattr(modules.globals, "enhancer_blend", float(v)))
+    blend_slider.set(getattr(modules.globals, 'enhancer_blend', 0.8))
+    blend_slider.pack(side="left", padx=5)
 
-    stop_button = ctk.CTkButton(
-        root, text=_("Destroy"), cursor="hand2", command=lambda: destroy()
-    )
-    stop_button.place(relx=0.4, rely=0.86, relwidth=0.2, relheight=0.05)
+    # FP16 toggle
+    fp16_var = ctk.BooleanVar(value=getattr(modules.globals, 'use_fp16', True))
+    ctk.CTkCheckBox(enhance_frame, text="FP16 (Faster)", variable=fp16_var,
+                    command=lambda: setattr(modules.globals, "use_fp16", fp16_var.get())).pack(anchor="w", pady=2)
 
-    preview_button = ctk.CTkButton(
-        root, text=_("Preview"), cursor="hand2", command=lambda: toggle_preview()
-    )
-    preview_button.place(relx=0.65, rely=0.86, relwidth=0.2, relheight=0.05)
+    # --- Camera Section ---
+    section_camera = ctk.CTkFrame(sidebar)
+    section_camera.pack(fill="x", padx=5, pady=5)
 
-    # --- Camera Selection ---
-    camera_label = ctk.CTkLabel(root, text=_("Select Camera:"))
-    camera_label.place(relx=0.1, rely=0.92, relwidth=0.2, relheight=0.05)
+    ctk.CTkLabel(section_camera, text="Live Camera", font=("", 14, "bold")).pack(pady=(5, 10))
 
-    available_cameras = get_available_cameras()
-    camera_indices, camera_names = available_cameras
+    camera_frame = ctk.CTkFrame(section_camera, fg_color="transparent")
+    camera_frame.pack(fill="x", padx=10, pady=5)
 
-    if not camera_names or camera_names[0] == "No cameras found":
-        camera_variable = ctk.StringVar(value="No cameras found")
-        camera_optionmenu = ctk.CTkOptionMenu(
-            root,
-            variable=camera_variable,
-            values=["No cameras found"],
-            state="disabled",
-        )
-    else:
-        camera_variable = ctk.StringVar(value=camera_names[0])
-        camera_optionmenu = ctk.CTkOptionMenu(
-            root, variable=camera_variable, values=camera_names
-        )
+    # Camera dropdown
+    camera_indices, camera_names = get_available_cameras()
+    camera_var = ctk.StringVar(value=camera_names[0] if camera_names else "No cameras")
 
-    camera_optionmenu.place(relx=0.35, rely=0.92, relwidth=0.25, relheight=0.05)
+    ctk.CTkLabel(camera_frame, text="Camera:", width=60, anchor="w").pack(side="left")
+    camera_dropdown = ctk.CTkOptionMenu(camera_frame, variable=camera_var, width=180,
+                                        values=camera_names if camera_names else ["No cameras"])
+    camera_dropdown.pack(side="left", padx=5)
 
-    live_button = ctk.CTkButton(
-        root,
-        text=_("Live"),
-        cursor="hand2",
-        command=lambda: webcam_preview(
-            root,
-            (
-                camera_indices[camera_names.index(camera_variable.get())]
-                if camera_names and camera_names[0] != "No cameras found"
-                else None
-            ),
-        ),
-        state=(
-            "normal"
-            if camera_names and camera_names[0] != "No cameras found"
-            else "disabled"
-        ),
-    )
-    live_button.place(relx=0.65, rely=0.92, relwidth=0.2, relheight=0.05)
-    # --- End Camera Selection ---
+    # Live options
+    live_opts = ctk.CTkFrame(section_camera, fg_color="transparent")
+    live_opts.pack(fill="x", padx=10, pady=5)
 
-    # 1) Define a DoubleVar for transparency (0 = fully transparent, 1 = fully opaque)
-    transparency_var = ctk.DoubleVar(value=1.0)
+    mirror_var = ctk.BooleanVar(value=modules.globals.live_mirror)
+    ctk.CTkCheckBox(live_opts, text="Mirror", variable=mirror_var, width=80,
+                    command=lambda: (setattr(modules.globals, "live_mirror", mirror_var.get()),
+                                    save_switch_states())).pack(side="left")
 
-    def on_transparency_change(value: float):
-        # Convert slider value to float
-        val = float(value)
-        modules.globals.opacity = val  # Set global opacity
-        percentage = int(val * 100)
+    # --- Output Options Section ---
+    section_output = ctk.CTkFrame(sidebar)
+    section_output.pack(fill="x", padx=5, pady=5)
 
-        if percentage == 0:
-            modules.globals.fp_ui["face_enhancer"] = False
-            update_status("Transparency set to 0% - Face swapping disabled.")
-        elif percentage == 100:
-            modules.globals.face_swapper_enabled = True
-            update_status("Transparency set to 100%.")
-        else:
-            modules.globals.face_swapper_enabled = True
-            update_status(f"Transparency set to {percentage}%")
+    ctk.CTkLabel(section_output, text="Output Options", font=("", 14, "bold")).pack(pady=(5, 10))
 
-    # 2) Transparency label and slider (placed ABOVE sharpness)
-    transparency_label = ctk.CTkLabel(root, text="Transparency:")
-    transparency_label.place(relx=0.15, rely=0.75, relwidth=0.2, relheight=0.05)
+    output_frame = ctk.CTkFrame(section_output, fg_color="transparent")
+    output_frame.pack(fill="x", padx=10)
 
-    transparency_slider = ctk.CTkSlider(
-        root,
-        from_=0.0,
-        to=1.0,
-        variable=transparency_var,
-        command=on_transparency_change,
-        fg_color="#E0E0E0",
-        progress_color="#007BFF",
-        button_color="#FFFFFF",
-        button_hover_color="#CCCCCC",
-        height=5,
-        border_width=1,
-        corner_radius=3,
-    )
-    transparency_slider.place(relx=0.35, rely=0.77, relwidth=0.5, relheight=0.02)
+    keep_fps_var = ctk.BooleanVar(value=modules.globals.keep_fps)
+    ctk.CTkCheckBox(output_frame, text="Keep FPS", variable=keep_fps_var, width=100,
+                    command=lambda: (setattr(modules.globals, "keep_fps", keep_fps_var.get()),
+                                    save_switch_states())).pack(side="left")
 
-    # 3) Sharpness label & slider
-    sharpness_var = ctk.DoubleVar(value=0.0)  # start at 0.0
-    def on_sharpness_change(value: float):
-        modules.globals.sharpness = float(value)
-        update_status(f"Sharpness set to {value:.1f}")
+    keep_audio_var = ctk.BooleanVar(value=modules.globals.keep_audio)
+    ctk.CTkCheckBox(output_frame, text="Keep Audio", variable=keep_audio_var, width=100,
+                    command=lambda: (setattr(modules.globals, "keep_audio", keep_audio_var.get()),
+                                    save_switch_states())).pack(side="left")
 
-    sharpness_label = ctk.CTkLabel(root, text="Sharpness:")
-    sharpness_label.place(relx=0.15, rely=0.80, relwidth=0.2, relheight=0.05)
+    keep_frames_var = ctk.BooleanVar(value=modules.globals.keep_frames)
+    ctk.CTkCheckBox(output_frame, text="Keep Frames", variable=keep_frames_var, width=100,
+                    command=lambda: (setattr(modules.globals, "keep_frames", keep_frames_var.get()),
+                                    save_switch_states())).pack(side="left")
 
-    sharpness_slider = ctk.CTkSlider(
-        root,
-        from_=0.0,
-        to=5.0,
-        variable=sharpness_var,
-        command=on_sharpness_change,
-        fg_color="#E0E0E0",
-        progress_color="#007BFF",
-        button_color="#FFFFFF",
-        button_hover_color="#CCCCCC",
-        height=5,
-        border_width=1,
-        corner_radius=3,
-    )
-    sharpness_slider.place(relx=0.35, rely=0.82, relwidth=0.5, relheight=0.02)
+    # === RIGHT MAIN AREA ===
+    main_frame = ctk.CTkFrame(root)
+    main_frame.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
+    main_frame.grid_columnconfigure(0, weight=1)
+    main_frame.grid_rowconfigure(0, weight=1)
 
-    # Status and link at the bottom
-    global status_label
-    status_label = ctk.CTkLabel(root, text=None, justify="center")
-    status_label.place(relx=0.1, rely=0.96, relwidth=0.8)
+    # Preview area (placeholder)
+    preview_frame = ctk.CTkFrame(main_frame, fg_color="#1a1a1a")
+    preview_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+    preview_frame.grid_columnconfigure(0, weight=1)
+    preview_frame.grid_rowconfigure(0, weight=1)
 
-    donate_label = ctk.CTkLabel(
-        root, text="Deep Live Cam", justify="center", cursor="hand2"
-    )
-    donate_label.place(relx=0.1, rely=0.98, relwidth=0.8)
-    donate_label.configure(
-        text_color=ctk.ThemeManager.theme.get("URL").get("text_color")
-    )
-    donate_label.bind(
-        "<Button>", lambda event: webbrowser.open("https://deeplivecam.net")
-    )
+    preview_placeholder = ctk.CTkLabel(preview_frame, text="Preview will appear here\n\nSelect source and target, then click Preview or Live",
+                                       font=("", 16), text_color="#666666")
+    preview_placeholder.grid(row=0, column=0)
+
+    # Action buttons
+    buttons_frame = ctk.CTkFrame(main_frame, fg_color="transparent", height=50)
+    buttons_frame.grid(row=1, column=0, sticky="ew", padx=5, pady=5)
+
+    ctk.CTkButton(buttons_frame, text="▶ Start Processing", width=150, height=40, fg_color="#28a745",
+                  hover_color="#218838", command=lambda: analyze_target(start, root)).pack(side="left", padx=5)
+
+    ctk.CTkButton(buttons_frame, text="👁 Preview", width=120, height=40,
+                  command=toggle_preview).pack(side="left", padx=5)
+
+    ctk.CTkButton(buttons_frame, text="📹 Live", width=120, height=40, fg_color="#007bff",
+                  hover_color="#0056b3",
+                  command=lambda: webcam_preview(root, camera_indices[camera_names.index(camera_var.get())]
+                                                 if camera_names and camera_var.get() in camera_names else None)
+                  ).pack(side="left", padx=5)
+
+    ctk.CTkButton(buttons_frame, text="✕ Exit", width=100, height=40, fg_color="#dc3545",
+                  hover_color="#c82333", command=destroy).pack(side="right", padx=5)
+
+    # Status bar
+    status_frame = ctk.CTkFrame(main_frame, height=30)
+    status_frame.grid(row=2, column=0, sticky="ew", padx=5, pady=(0, 5))
+
+    status_label = ctk.CTkLabel(status_frame, text="Ready", anchor="w")
+    status_label.pack(side="left", padx=10)
+
+    version_label = ctk.CTkLabel(status_frame, text=f"v{modules.metadata.version}", anchor="e",
+                                 text_color="#666666")
+    version_label.pack(side="right", padx=10)
 
     return root
 
@@ -541,19 +406,42 @@ def close_mapper_window():
         POPUP_LIVE = None
 
 
+def create_modal_dialog(parent, title, width, height):
+    """Create a modal dialog that appears in the foreground."""
+    dialog = ctk.CTkToplevel(parent)
+    dialog.title(title)
+    dialog.geometry(f"{width}x{height}")
+
+    # Make it modal and bring to front
+    dialog.transient(parent)
+    dialog.grab_set()
+    dialog.focus_force()
+    dialog.lift()
+
+    # Center on parent
+    dialog.update_idletasks()
+    x = parent.winfo_x() + (parent.winfo_width() - width) // 2
+    y = parent.winfo_y() + (parent.winfo_height() - height) // 2
+    dialog.geometry(f"+{x}+{y}")
+
+    return dialog
+
+
 def analyze_target(start: Callable[[], None], root: ctk.CTk):
-    if POPUP != None and POPUP.winfo_exists():
-        update_status("Please complete pop-up or close it.")
+    if POPUP is not None and POPUP.winfo_exists():
+        POPUP.focus_force()
+        POPUP.lift()
+        update_status("Please complete the popup or close it.")
         return
 
     if modules.globals.map_faces:
         modules.globals.source_target_map = []
 
         if is_image(modules.globals.target_path):
-            update_status("Getting unique faces")
+            update_status("Getting unique faces...")
             get_unique_faces_from_target_image()
         elif is_video(modules.globals.target_path):
-            update_status("Getting unique faces")
+            update_status("Getting unique faces...")
             get_unique_faces_from_target_video()
 
         if len(modules.globals.source_target_map) > 0:
@@ -564,125 +452,102 @@ def analyze_target(start: Callable[[], None], root: ctk.CTk):
         select_output_path(start)
 
 
-def create_source_target_popup(
-        start: Callable[[], None], root: ctk.CTk, map: list
-) -> None:
+def create_source_target_popup(start: Callable[[], None], root: ctk.CTk, map: list) -> None:
     global POPUP, popup_status_label
 
-    POPUP = ctk.CTkToplevel(root)
-    POPUP.title(_("Source x Target Mapper"))
-    POPUP.geometry(f"{POPUP_WIDTH}x{POPUP_HEIGHT}")
-    POPUP.focus()
+    POPUP = create_modal_dialog(root, _("Source ↔ Target Mapper"), 700, 600)
 
     def on_submit_click(start):
         if has_valid_map():
             POPUP.destroy()
             select_output_path(start)
         else:
-            update_pop_status("Atleast 1 source with target is required!")
+            popup_status_label.configure(text="At least 1 source with target is required!")
 
-    scrollable_frame = ctk.CTkScrollableFrame(
-        POPUP, width=POPUP_SCROLL_WIDTH, height=POPUP_SCROLL_HEIGHT
-    )
-    scrollable_frame.grid(row=0, column=0, padx=0, pady=0, sticky="nsew")
+    # Header
+    ctk.CTkLabel(POPUP, text="Map source faces to target faces", font=("", 14)).pack(pady=10)
+
+    # Scrollable content
+    scrollable = ctk.CTkScrollableFrame(POPUP, width=660, height=450)
+    scrollable.pack(fill="both", expand=True, padx=10, pady=5)
 
     def on_button_click(map, button_num):
-        map = update_popup_source(scrollable_frame, map, button_num)
+        update_popup_source(scrollable, map, button_num)
 
     for item in map:
         id = item["id"]
 
-        button = ctk.CTkButton(
-            scrollable_frame,
-            text=_("Select source image"),
-            command=lambda id=id: on_button_click(map, id),
-            width=DEFAULT_BUTTON_WIDTH,
-            height=DEFAULT_BUTTON_HEIGHT,
-        )
-        button.grid(row=id, column=0, padx=50, pady=10)
+        row_frame = ctk.CTkFrame(scrollable)
+        row_frame.pack(fill="x", pady=5, padx=5)
 
-        x_label = ctk.CTkLabel(
-            scrollable_frame,
-            text=f"X",
-            width=MAPPER_PREVIEW_MAX_WIDTH,
-            height=MAPPER_PREVIEW_MAX_HEIGHT,
-        )
-        x_label.grid(row=id, column=2, padx=10, pady=10)
+        ctk.CTkButton(row_frame, text="Select Source", width=120,
+                      command=lambda id=id: on_button_click(map, id)).pack(side="left", padx=5)
 
-        image = Image.fromarray(cv2.cvtColor(item["target"]["cv2"], cv2.COLOR_BGR2RGB))
-        image = image.resize(
-            (MAPPER_PREVIEW_MAX_WIDTH, MAPPER_PREVIEW_MAX_HEIGHT), Image.LANCZOS
-        )
-        tk_image = ctk.CTkImage(image, size=image.size)
+        ctk.CTkLabel(row_frame, text="→", width=30).pack(side="left")
 
-        target_image = ctk.CTkLabel(
-            scrollable_frame,
-            text=f"T-{id}",
-            width=MAPPER_PREVIEW_MAX_WIDTH,
-            height=MAPPER_PREVIEW_MAX_HEIGHT,
-        )
-        target_image.grid(row=id, column=3, padx=10, pady=10)
-        target_image.configure(image=tk_image)
+        # Target preview
+        target_img = Image.fromarray(cv2.cvtColor(item["target"]["cv2"], cv2.COLOR_BGR2RGB))
+        target_img = target_img.resize((80, 80), Image.LANCZOS)
+        target_ctk = ctk.CTkImage(target_img, size=(80, 80))
+        ctk.CTkLabel(row_frame, image=target_ctk, text="").pack(side="left", padx=5)
 
-    popup_status_label = ctk.CTkLabel(POPUP, text=None, justify="center")
-    popup_status_label.grid(row=1, column=0, pady=15)
+    # Footer
+    footer = ctk.CTkFrame(POPUP, fg_color="transparent")
+    footer.pack(fill="x", padx=10, pady=10)
 
-    close_button = ctk.CTkButton(
-        POPUP, text=_("Submit"), command=lambda: on_submit_click(start)
-    )
-    close_button.grid(row=2, column=0, pady=10)
+    popup_status_label = ctk.CTkLabel(footer, text="", text_color="#ff6b6b")
+    popup_status_label.pack(side="left")
+
+    ctk.CTkButton(footer, text="Submit", width=100, command=lambda: on_submit_click(start)).pack(side="right")
 
 
-def update_popup_source(
-        scrollable_frame: ctk.CTkScrollableFrame, map: list, button_num: int
-) -> list:
-    global source_label_dict
+def update_popup_source(scrollable_frame, map, item_id):
+    global source_label_dict, RECENT_DIRECTORY_SOURCE, POPUP
+
+    # Find item by ID, not by index
+    item = next((x for x in map if x["id"] == item_id), None)
+    if item is None:
+        return map
+
+    # Temporarily release grab so file dialog works properly
+    if POPUP and POPUP.winfo_exists():
+        POPUP.grab_release()
 
     source_path = ctk.filedialog.askopenfilename(
-        title=_("select an source image"),
+        title="Select source image",
         initialdir=RECENT_DIRECTORY_SOURCE,
         filetypes=[img_ft],
+        parent=POPUP,
     )
 
-    if "source" in map[button_num]:
-        map[button_num].pop("source")
-        source_label_dict[button_num].destroy()
-        del source_label_dict[button_num]
+    # Restore grab
+    if POPUP and POPUP.winfo_exists():
+        POPUP.grab_set()
+
+    if "source" in item:
+        item.pop("source")
+        if item_id in source_label_dict:
+            source_label_dict[item_id].destroy()
+            del source_label_dict[item_id]
 
     if source_path == "":
         return map
+
+    RECENT_DIRECTORY_SOURCE = os.path.dirname(source_path)
+    cv2_img = cv2.imread(source_path)
+    face = get_one_face(cv2_img)
+
+    if face:
+        x_min, y_min, x_max, y_max = face["bbox"]
+        item["source"] = {
+            "cv2": cv2_img[int(y_min):int(y_max), int(x_min):int(x_max)],
+            "face": face,
+        }
+        update_status("Source face added")
     else:
-        cv2_img = cv2.imread(source_path)
-        face = get_one_face(cv2_img)
+        update_status("No face detected in source image")
 
-        if face:
-            x_min, y_min, x_max, y_max = face["bbox"]
-
-            map[button_num]["source"] = {
-                "cv2": cv2_img[int(y_min): int(y_max), int(x_min): int(x_max)],
-                "face": face,
-            }
-
-            image = Image.fromarray(
-                cv2.cvtColor(map[button_num]["source"]["cv2"], cv2.COLOR_BGR2RGB)
-            )
-            image = image.resize(
-                (MAPPER_PREVIEW_MAX_WIDTH, MAPPER_PREVIEW_MAX_HEIGHT), Image.LANCZOS
-            )
-            tk_image = ctk.CTkImage(image, size=image.size)
-
-            source_image = ctk.CTkLabel(
-                scrollable_frame,
-                text=f"S-{button_num}",
-                width=MAPPER_PREVIEW_MAX_WIDTH,
-                height=MAPPER_PREVIEW_MAX_HEIGHT,
-            )
-            source_image.grid(row=button_num, column=1, padx=10, pady=10)
-            source_image.configure(image=tk_image)
-            source_label_dict[button_num] = source_image
-        else:
-            update_pop_status("Face could not be detected in last upload!")
-        return map
+    return map
 
 
 def create_preview(parent: ctk.CTkToplevel) -> ctk.CTkToplevel:
@@ -690,62 +555,62 @@ def create_preview(parent: ctk.CTkToplevel) -> ctk.CTkToplevel:
 
     preview = ctk.CTkToplevel(parent)
     preview.withdraw()
-    preview.title(_("Preview"))
-    preview.configure()
-    preview.protocol("WM_DELETE_WINDOW", lambda: toggle_preview())
-    preview.resizable(width=True, height=True)
+    preview.title("Preview")
+    preview.protocol("WM_DELETE_WINDOW", toggle_preview)
+    preview.resizable(True, True)
+    preview.minsize(640, 480)
 
     preview_label = ctk.CTkLabel(preview, text=None)
     preview_label.pack(fill="both", expand=True)
 
-    preview_slider = ctk.CTkSlider(
-        preview, from_=0, to=0, command=lambda frame_value: update_preview(frame_value)
-    )
+    preview_slider = ctk.CTkSlider(preview, from_=0, to=0,
+                                   command=lambda v: update_preview(int(v)))
 
     return preview
 
 
 def update_status(text: str) -> None:
-    status_label.configure(text=_(text))
-    ROOT.update()
+    if status_label:
+        status_label.configure(text=text)
+        # Don't call update_idletasks() here - let the event loop handle it naturally
 
 
 def update_pop_status(text: str) -> None:
-    popup_status_label.configure(text=_(text))
+    if popup_status_label:
+        popup_status_label.configure(text=text)
 
 
 def update_pop_live_status(text: str) -> None:
-    popup_status_label_live.configure(text=_(text))
+    if popup_status_label_live:
+        popup_status_label_live.configure(text=text)
 
 
 def update_tumbler(var: str, value: bool) -> None:
     modules.globals.fp_ui[var] = value
     save_switch_states()
-    # If we're currently in a live preview, update the frame processors
-    if PREVIEW.state() == "normal":
-        global frame_processors
-        frame_processors = get_frame_processors_modules(
-            modules.globals.frame_processors
-        )
 
 
 def select_source_path() -> None:
-    global RECENT_DIRECTORY_SOURCE, img_ft, vid_ft
+    global RECENT_DIRECTORY_SOURCE
 
-    PREVIEW.withdraw()
+    if PREVIEW:
+        PREVIEW.withdraw()
+
     source_path = ctk.filedialog.askopenfilename(
-        title=_("select an source image"),
+        title="Select source face image",
         initialdir=RECENT_DIRECTORY_SOURCE,
         filetypes=[img_ft],
     )
+
     if is_image(source_path):
         modules.globals.source_path = source_path
-        RECENT_DIRECTORY_SOURCE = os.path.dirname(modules.globals.source_path)
-        image = render_image_preview(modules.globals.source_path, (200, 200))
-        source_label.configure(image=image)
+        RECENT_DIRECTORY_SOURCE = os.path.dirname(source_path)
+        image = render_image_preview(source_path, (120, 120))
+        source_label.configure(image=image, text="")
+        update_status(f"Source: {os.path.basename(source_path)}")
     else:
         modules.globals.source_path = None
-        source_label.configure(image=None)
+        source_label.configure(image=None, text="No Source")
 
 
 def swap_faces_paths() -> None:
@@ -755,6 +620,7 @@ def swap_faces_paths() -> None:
     target_path = modules.globals.target_path
 
     if not is_image(source_path) or not is_image(target_path):
+        update_status("Both source and target must be images to swap")
         return
 
     modules.globals.source_path = target_path
@@ -763,45 +629,53 @@ def swap_faces_paths() -> None:
     RECENT_DIRECTORY_SOURCE = os.path.dirname(modules.globals.source_path)
     RECENT_DIRECTORY_TARGET = os.path.dirname(modules.globals.target_path)
 
-    PREVIEW.withdraw()
+    if PREVIEW:
+        PREVIEW.withdraw()
 
-    source_image = render_image_preview(modules.globals.source_path, (200, 200))
-    source_label.configure(image=source_image)
+    source_image = render_image_preview(modules.globals.source_path, (120, 120))
+    source_label.configure(image=source_image, text="")
 
-    target_image = render_image_preview(modules.globals.target_path, (200, 200))
-    target_label.configure(image=target_image)
+    target_image = render_image_preview(modules.globals.target_path, (120, 120))
+    target_label.configure(image=target_image, text="")
+
+    update_status("Swapped source and target")
 
 
 def select_target_path() -> None:
-    global RECENT_DIRECTORY_TARGET, img_ft, vid_ft
+    global RECENT_DIRECTORY_TARGET
 
-    PREVIEW.withdraw()
+    if PREVIEW:
+        PREVIEW.withdraw()
+
     target_path = ctk.filedialog.askopenfilename(
-        title=_("select an target image or video"),
+        title="Select target image or video",
         initialdir=RECENT_DIRECTORY_TARGET,
         filetypes=[img_ft, vid_ft],
     )
+
     if is_image(target_path):
         modules.globals.target_path = target_path
-        RECENT_DIRECTORY_TARGET = os.path.dirname(modules.globals.target_path)
-        image = render_image_preview(modules.globals.target_path, (200, 200))
-        target_label.configure(image=image)
+        RECENT_DIRECTORY_TARGET = os.path.dirname(target_path)
+        image = render_image_preview(target_path, (120, 120))
+        target_label.configure(image=image, text="")
+        update_status(f"Target: {os.path.basename(target_path)}")
     elif is_video(target_path):
         modules.globals.target_path = target_path
-        RECENT_DIRECTORY_TARGET = os.path.dirname(modules.globals.target_path)
-        video_frame = render_video_preview(target_path, (200, 200))
-        target_label.configure(image=video_frame)
+        RECENT_DIRECTORY_TARGET = os.path.dirname(target_path)
+        video_frame = render_video_preview(target_path, (120, 120))
+        target_label.configure(image=video_frame, text="")
+        update_status(f"Target: {os.path.basename(target_path)}")
     else:
         modules.globals.target_path = None
-        target_label.configure(image=None)
+        target_label.configure(image=None, text="No Target")
 
 
 def select_output_path(start: Callable[[], None]) -> None:
-    global RECENT_DIRECTORY_OUTPUT, img_ft, vid_ft
+    global RECENT_DIRECTORY_OUTPUT
 
     if is_image(modules.globals.target_path):
         output_path = ctk.filedialog.asksaveasfilename(
-            title=_("save image output file"),
+            title="Save output image",
             filetypes=[img_ft],
             defaultextension=".png",
             initialfile="output.png",
@@ -809,7 +683,7 @@ def select_output_path(start: Callable[[], None]) -> None:
         )
     elif is_video(modules.globals.target_path):
         output_path = ctk.filedialog.asksaveasfilename(
-            title=_("save video output file"),
+            title="Save output video",
             filetypes=[vid_ft],
             defaultextension=".mp4",
             initialfile="output.mp4",
@@ -817,47 +691,37 @@ def select_output_path(start: Callable[[], None]) -> None:
         )
     else:
         output_path = None
+
     if output_path:
         modules.globals.output_path = output_path
-        RECENT_DIRECTORY_OUTPUT = os.path.dirname(modules.globals.output_path)
+        RECENT_DIRECTORY_OUTPUT = os.path.dirname(output_path)
         start()
 
 
 def check_and_ignore_nsfw(target, destroy: Callable = None) -> bool:
-    """Check if the target is NSFW.
-    TODO: Consider to make blur the target.
-    """
     from numpy import ndarray
     from modules.predicter import predict_image, predict_video, predict_frame
 
-    if type(target) is str:  # image/video file path
+    if type(target) is str:
         check_nsfw = predict_image if has_image_extension(target) else predict_video
-    elif type(target) is ndarray:  # frame object
+    elif type(target) is ndarray:
         check_nsfw = predict_frame
+
     if check_nsfw and check_nsfw(target):
         if destroy:
-            destroy(
-                to_quit=False
-            )  # Do not need to destroy the window frame if the target is NSFW
-        update_status("Processing ignored!")
+            destroy(to_quit=False)
+        update_status("Processing ignored - NSFW content detected")
         return True
-    else:
-        return False
+    return False
 
 
 def fit_image_to_size(image, width: int, height: int):
     if width is None and height is None:
         return image
-    h, w, _ = image.shape
-    ratio_h = 0.0
-    ratio_w = 0.0
-    if width > height:
-        ratio_h = height / h
-    else:
-        ratio_w = width / w
-    ratio = max(ratio_w, ratio_h)
-    new_size = (int(ratio * w), int(ratio * h))
-    return cv2.resize(image, dsize=new_size)
+    h, w = image.shape[:2]
+    ratio = min(width / w, height / h)
+    new_size = (int(w * ratio), int(h * ratio))
+    return cv2.resize(image, new_size)
 
 
 def render_image_preview(image_path: str, size: Tuple[int, int]) -> ctk.CTkImage:
@@ -867,20 +731,19 @@ def render_image_preview(image_path: str, size: Tuple[int, int]) -> ctk.CTkImage
     return ctk.CTkImage(image, size=image.size)
 
 
-def render_video_preview(
-        video_path: str, size: Tuple[int, int], frame_number: int = 0
-) -> ctk.CTkImage:
+def render_video_preview(video_path: str, size: Tuple[int, int], frame_number: int = 0) -> ctk.CTkImage:
     capture = cv2.VideoCapture(video_path)
     if frame_number:
         capture.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
     has_frame, frame = capture.read()
+    capture.release()
+
     if has_frame:
         image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         if size:
             image = ImageOps.fit(image, size, Image.LANCZOS)
         return ctk.CTkImage(image, size=image.size)
-    capture.release()
-    cv2.destroyAllWindows()
+    return None
 
 
 def toggle_preview() -> None:
@@ -889,12 +752,14 @@ def toggle_preview() -> None:
     elif modules.globals.source_path and modules.globals.target_path:
         init_preview()
         update_preview()
+    else:
+        update_status("Please select both source and target first")
 
 
 def init_preview() -> None:
     if is_image(modules.globals.target_path):
         preview_slider.pack_forget()
-    if is_video(modules.globals.target_path):
+    elif is_video(modules.globals.target_path):
         video_frame_total = get_video_frame_total(modules.globals.target_path)
         preview_slider.configure(to=video_frame_total)
         preview_slider.pack(fill="x")
@@ -903,32 +768,58 @@ def init_preview() -> None:
 
 def update_preview(frame_number: int = 0) -> None:
     if modules.globals.source_path and modules.globals.target_path:
-        update_status("Processing...")
+        update_status("Processing preview...")
         temp_frame = get_video_frame(modules.globals.target_path, frame_number)
+
         if modules.globals.nsfw_filter and check_and_ignore_nsfw(temp_frame):
             return
-        for frame_processor in get_frame_processors_modules(
-                modules.globals.frame_processors
-        ):
+
+        for frame_processor in get_frame_processors_modules(modules.globals.frame_processors):
             temp_frame = frame_processor.process_frame(
                 get_one_face(cv2.imread(modules.globals.source_path)), temp_frame
             )
+
         image = Image.fromarray(cv2.cvtColor(temp_frame, cv2.COLOR_BGR2RGB))
-        image = ImageOps.contain(
-            image, (PREVIEW_MAX_WIDTH, PREVIEW_MAX_HEIGHT), Image.LANCZOS
-        )
+        image = ImageOps.contain(image, (1200, 700), Image.LANCZOS)
         image = ctk.CTkImage(image, size=image.size)
         preview_label.configure(image=image)
-        update_status("Processing succeed!")
+        update_status("Preview ready")
         PREVIEW.deiconify()
+
+
+def get_available_cameras():
+    """Returns lists of camera indices and names."""
+    if platform.system() == "Windows":
+        try:
+            graph = FilterGraph()
+            devices = graph.get_input_devices()
+            if devices:
+                return list(range(len(devices))), devices
+        except:
+            pass
+
+    # Fallback: probe cameras
+    indices = []
+    names = []
+    for i in range(5):
+        cap = cv2.VideoCapture(i)
+        if cap.isOpened():
+            indices.append(i)
+            names.append(f"Camera {i}")
+            cap.release()
+
+    return (indices, names) if indices else ([], ["No cameras found"])
 
 
 def webcam_preview(root: ctk.CTk, camera_index: int):
     global POPUP_LIVE
 
+    if camera_index is None:
+        update_status("No camera selected")
+        return
+
     if POPUP_LIVE and POPUP_LIVE.winfo_exists():
-        update_status("Source x Target Mapper is already open.")
-        POPUP_LIVE.focus()
+        POPUP_LIVE.focus_force()
         return
 
     if not modules.globals.map_faces:
@@ -938,103 +829,32 @@ def webcam_preview(root: ctk.CTk, camera_index: int):
         create_webcam_preview(camera_index)
     else:
         modules.globals.source_target_map = []
-        create_source_target_popup_for_webcam(
-            root, modules.globals.source_target_map, camera_index
-        )
-
-
-
-def get_available_cameras():
-    """Returns a list of available camera names and indices."""
-    if platform.system() == "Windows":
-        try:
-            graph = FilterGraph()
-            devices = graph.get_input_devices()
-
-            # Create list of indices and names
-            camera_indices = list(range(len(devices)))
-            camera_names = devices
-
-            # If no cameras found through DirectShow, try OpenCV fallback
-            if not camera_names:
-                # Try to open camera with index -1 and 0
-                test_indices = [-1, 0]
-                working_cameras = []
-
-                for idx in test_indices:
-                    cap = cv2.VideoCapture(idx)
-                    if cap.isOpened():
-                        working_cameras.append(f"Camera {idx}")
-                        cap.release()
-
-                if working_cameras:
-                    return test_indices[: len(working_cameras)], working_cameras
-
-            # If still no cameras found, return empty lists
-            if not camera_names:
-                return [], ["No cameras found"]
-
-            return camera_indices, camera_names
-
-        except Exception as e:
-            print(f"Error detecting cameras: {str(e)}")
-            return [], ["No cameras found"]
-    else:
-        # Unix-like systems (Linux/Mac) camera detection
-        camera_indices = []
-        camera_names = []
-
-        if platform.system() == "Darwin":  # macOS specific handling
-            # Try to open the default FaceTime camera first
-            cap = cv2.VideoCapture(0)
-            if cap.isOpened():
-                camera_indices.append(0)
-                camera_names.append("FaceTime Camera")
-                cap.release()
-
-            # On macOS, additional cameras typically use indices 1 and 2
-            for i in [1, 2]:
-                cap = cv2.VideoCapture(i)
-                if cap.isOpened():
-                    camera_indices.append(i)
-                    camera_names.append(f"Camera {i}")
-                    cap.release()
-        else:
-            # Linux camera detection - test first 10 indices
-            for i in range(10):
-                cap = cv2.VideoCapture(i)
-                if cap.isOpened():
-                    camera_indices.append(i)
-                    camera_names.append(f"Camera {i}")
-                    cap.release()
-
-        if not camera_names:
-            return [], ["No cameras found"]
-
-        return camera_indices, camera_names
+        create_source_target_popup_for_webcam(root, modules.globals.source_target_map, camera_index)
 
 
 def create_webcam_preview(camera_index: int):
     """
-    Parallel GPU pipeline webcam preview.
-
-    Pipeline: [Capture] -> [Swap GPU0] -> [Enhance GPU1] -> [Display]
-
-    Uses double-buffering so GPU0 can process frame N+1 while GPU1 enhances frame N.
+    Non-blocking parallel GPU pipeline webcam preview.
+    Uses after() callbacks instead of blocking while loop for responsive UI.
     """
     global preview_label, PREVIEW
 
+    PREVIEW_WIDTH = 960
+    PREVIEW_HEIGHT = 540
+
     cap = VideoCapturer(camera_index)
-    if not cap.start(PREVIEW_DEFAULT_WIDTH, PREVIEW_DEFAULT_HEIGHT, 60):
+    if not cap.start(PREVIEW_WIDTH, PREVIEW_HEIGHT, 60):
         update_status("Failed to start camera")
         return
 
-    preview_label.configure(width=PREVIEW_DEFAULT_WIDTH, height=PREVIEW_DEFAULT_HEIGHT)
+    # Configure preview window
+    PREVIEW.geometry(f"{PREVIEW_WIDTH + 20}x{PREVIEW_HEIGHT + 50}")
+    preview_label.configure(width=PREVIEW_WIDTH, height=PREVIEW_HEIGHT)
     PREVIEW.deiconify()
+    PREVIEW.lift()
 
     frame_processors = get_frame_processors_modules(modules.globals.frame_processors)
 
-    # Separate processors by type
     swap_processor = None
     enhance_processor = None
     for fp in frame_processors:
@@ -1043,40 +863,28 @@ def create_webcam_preview(camera_index: int):
         else:
             swap_processor = fp
 
-    source_image = None
-    prev_time = time.time()
-    fps_update_interval = 0.5
-    frame_count = 0
-    processed_frame_count = 0  # Count of actual new processed frames
-    display_fps = 0
-    processed_fps = 0  # Actual FPS of new processed content
+    # State stored in a dict to allow modification in nested functions
+    state = {
+        'source_image': None,
+        'prev_time': time.time(),
+        'frame_count': 0,
+        'processed_frame_count': 0,
+        'processed_fps': 0,
+        'last_processed_frame': None,
+        'debug_count': 0,
+        'swap_times': {'total': 0, 'count': 0},
+        'enhance_times': {'total': 0, 'count': 0},
+        'running': True,
+        'after_id': None,
+    }
 
-    # Debug timing
-    debug_interval = 30
-    debug_count = 0
-    total_swap_time = 0
-    total_enhance_time = 0
-    total_display_time = 0
-
-    # Parallel processing state
-    from concurrent.futures import ThreadPoolExecutor
-
-    # Queues for pipeline stages
-    swap_queue = queue.Queue(maxsize=2)      # Frames waiting for swap
-    enhance_queue = queue.Queue(maxsize=2)    # Swapped frames waiting for enhance
-    display_queue = queue.Queue(maxsize=2)    # Enhanced frames ready for display
-
+    # Pipeline queues
+    swap_queue = queue.Queue(maxsize=2)
+    enhance_queue = queue.Queue(maxsize=2)
+    display_queue = queue.Queue(maxsize=2)
     shutdown_event = threading.Event()
 
-    # Thread-local storage for CUDA context
-    swap_times = {'total': 0, 'count': 0}
-    enhance_times = {'total': 0, 'count': 0}
-
     def swap_worker():
-        """Face swap worker - runs on GPU 0."""
-        nonlocal source_image
-
-        # Set CUDA device for this thread
         if torch.cuda.is_available():
             torch.cuda.set_device(0)
 
@@ -1086,19 +894,18 @@ def create_webcam_preview(camera_index: int):
                 if frame_data is None:
                     break
 
-                temp_frame, use_map_faces = frame_data
+                temp_frame, use_map, source_img = frame_data
                 t0 = time.perf_counter()
 
                 if swap_processor:
-                    if not use_map_faces:
-                        temp_frame = swap_processor.process_frame(source_image, temp_frame)
+                    if not use_map:
+                        temp_frame = swap_processor.process_frame(source_img, temp_frame)
                     else:
                         temp_frame = swap_processor.process_frame_v2(temp_frame)
 
-                swap_times['total'] += time.perf_counter() - t0
-                swap_times['count'] += 1
+                state['swap_times']['total'] += time.perf_counter() - t0
+                state['swap_times']['count'] += 1
 
-                # Pass to enhance stage
                 try:
                     enhance_queue.put_nowait(temp_frame)
                 except queue.Full:
@@ -1107,15 +914,12 @@ def create_webcam_preview(camera_index: int):
                         enhance_queue.put_nowait(temp_frame)
                     except:
                         pass
-
             except queue.Empty:
                 continue
             except Exception as e:
                 print(f"[SWAP] Error: {e}")
 
     def enhance_worker():
-        """Face enhance worker - runs on GPU 1."""
-        # Set CUDA device for this thread
         if torch.cuda.is_available() and torch.cuda.device_count() > 1:
             torch.cuda.set_device(1)
 
@@ -1133,10 +937,9 @@ def create_webcam_preview(camera_index: int):
                     else:
                         temp_frame = enhance_processor.process_frame_v2(temp_frame)
 
-                enhance_times['total'] += time.perf_counter() - t0
-                enhance_times['count'] += 1
+                state['enhance_times']['total'] += time.perf_counter() - t0
+                state['enhance_times']['count'] += 1
 
-                # Pass to display
                 try:
                     display_queue.put_nowait(temp_frame)
                 except queue.Full:
@@ -1145,179 +948,181 @@ def create_webcam_preview(camera_index: int):
                         display_queue.put_nowait(temp_frame)
                     except:
                         pass
-
             except queue.Empty:
                 continue
             except Exception as e:
                 print(f"[ENHANCE] Error: {e}")
 
-    # Start worker threads
+    # Start workers
     swap_thread = threading.Thread(target=swap_worker, daemon=True)
     enhance_thread = threading.Thread(target=enhance_worker, daemon=True)
     swap_thread.start()
     enhance_thread.start()
 
-    print("[PIPELINE] Started parallel GPU pipeline: Swap(GPU0) -> Enhance(GPU1)")
+    # Reusable CTkImage to reduce object creation
+    current_ctk_image = [None]
 
-    # Keep track of last processed frame
-    last_processed_frame = None
+    def update_frame():
+        """Non-blocking frame update using after()."""
+        if not state['running'] or PREVIEW.state() == "withdrawn":
+            cleanup()
+            return
 
-    # Main loop: capture and display
-    while True:
         ret, frame = cap.read()
         if not ret:
-            break
+            cleanup()
+            return
 
         temp_frame = frame.copy()
-
         if modules.globals.live_mirror:
             temp_frame = cv2.flip(temp_frame, 1)
 
-        temp_frame = fit_image_to_size(
-            temp_frame, PREVIEW.winfo_width(), PREVIEW.winfo_height()
-        )
+        temp_frame = fit_image_to_size(temp_frame, PREVIEW_WIDTH, PREVIEW_HEIGHT)
 
         # Load source image once
-        if source_image is None and modules.globals.source_path:
-            source_image = get_one_face(cv2.imread(modules.globals.source_path))
+        if state['source_image'] is None and modules.globals.source_path:
+            state['source_image'] = get_one_face(cv2.imread(modules.globals.source_path))
 
-        # Submit frame to swap queue
+        # Submit frame to processing pipeline
         try:
-            swap_queue.put_nowait((temp_frame, modules.globals.map_faces))
+            swap_queue.put_nowait((temp_frame, modules.globals.map_faces, state['source_image']))
         except queue.Full:
             try:
                 swap_queue.get_nowait()
-                swap_queue.put_nowait((temp_frame, modules.globals.map_faces))
+                swap_queue.put_nowait((temp_frame, modules.globals.map_faces, state['source_image']))
             except:
                 pass
 
-        # Try to get a processed frame for display
-        got_new_frame = False
+        # Get processed frame if available
         try:
             new_frame = display_queue.get_nowait()
-            last_processed_frame = new_frame
-            got_new_frame = True
-            processed_frame_count += 1  # Count actual new processed frames
+            state['last_processed_frame'] = new_frame
+            state['processed_frame_count'] += 1
         except queue.Empty:
-            pass  # Keep showing last processed frame
+            pass
 
-        # Determine what to display
-        if last_processed_frame is not None:
-            display_frame = last_processed_frame
-        else:
-            # No processed frame yet, show raw frame with "Processing..." text
-            display_frame = temp_frame.copy()
-            cv2.putText(display_frame, "Processing...", (10, 60),
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+        # Display frame
+        display_frame = state['last_processed_frame'] if state['last_processed_frame'] is not None else temp_frame
 
-        # Calculate actual processed FPS (new frames per second)
+        # FPS calculation
         current_time = time.time()
-        frame_count += 1
-        if current_time - prev_time >= fps_update_interval:
-            display_fps = frame_count / (current_time - prev_time)
-            processed_fps = processed_frame_count / (current_time - prev_time)
-            frame_count = 0
-            processed_frame_count = 0
-            prev_time = current_time
+        state['frame_count'] += 1
+        if current_time - state['prev_time'] >= 0.5:
+            state['processed_fps'] = state['processed_frame_count'] / (current_time - state['prev_time'])
+            state['frame_count'] = 0
+            state['processed_frame_count'] = 0
+            state['prev_time'] = current_time
 
         if modules.globals.show_fps:
-            cv2.putText(
-                display_frame,
-                f"FPS: {processed_fps:.1f}",
-                (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0, 255, 0),
-                2,
-            )
+            cv2.putText(display_frame, f"FPS: {state['processed_fps']:.1f}", (10, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-        # Optimized display - minimize object creation
-        t0 = time.perf_counter()
-        # Convert BGR to RGB using numpy (faster than cv2.cvtColor for this case)
-        rgb_frame = display_frame[:, :, ::-1]
-        # Create PIL image directly from numpy array
+        # Efficient display update
+        rgb_frame = display_frame[:, :, ::-1].copy()  # Ensure contiguous array
         image = Image.fromarray(rgb_frame)
-        # Create CTkImage with explicit size
-        ctk_image = ctk.CTkImage(light_image=image, size=(display_frame.shape[1], display_frame.shape[0]))
-        preview_label.configure(image=ctk_image)
-        # Use update_idletasks() instead of update() for less overhead
-        ROOT.update_idletasks()
-        ROOT.update()
-        total_display_time += time.perf_counter() - t0
+        current_ctk_image[0] = ctk.CTkImage(light_image=image, size=(display_frame.shape[1], display_frame.shape[0]))
+        preview_label.configure(image=current_ctk_image[0])
 
-        # Debug output
-        debug_count += 1
-        if debug_count >= debug_interval:
-            avg_swap = (swap_times['total'] / max(swap_times['count'], 1)) * 1000
-            avg_enhance = (enhance_times['total'] / max(enhance_times['count'], 1)) * 1000
-            avg_display = (total_display_time / debug_count) * 1000
-            print(f"[TIMING] Swap: {avg_swap:.1f}ms, Enhance: {avg_enhance:.1f}ms, Display: {avg_display:.1f}ms, ProcessedFPS: {processed_fps:.1f}")
-            debug_count = 0
-            total_display_time = 0
-            swap_times['total'] = 0
-            swap_times['count'] = 0
-            enhance_times['total'] = 0
-            enhance_times['count'] = 0
+        # Debug output (less frequent)
+        state['debug_count'] += 1
+        if state['debug_count'] >= 60:  # Every ~2 seconds at 30fps
+            avg_swap = (state['swap_times']['total'] / max(state['swap_times']['count'], 1)) * 1000
+            avg_enhance = (state['enhance_times']['total'] / max(state['enhance_times']['count'], 1)) * 1000
+            print(f"[TIMING] Swap: {avg_swap:.1f}ms, Enhance: {avg_enhance:.1f}ms, FPS: {state['processed_fps']:.1f}")
+            state['debug_count'] = 0
+            state['swap_times'] = {'total': 0, 'count': 0}
+            state['enhance_times'] = {'total': 0, 'count': 0}
 
-            # Clear CUDA cache periodically
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-        if PREVIEW.state() == "withdrawn":
-            break
+        # Schedule next frame (non-blocking) - ~33ms = 30fps display rate
+        state['after_id'] = PREVIEW.after(16, update_frame)
 
-    # Cleanup
-    shutdown_event.set()
-    swap_queue.put(None)
-    enhance_queue.put(None)
-    swap_thread.join(timeout=1.0)
-    enhance_thread.join(timeout=1.0)
-    cap.release()
-    PREVIEW.withdraw()
+    def cleanup():
+        """Clean up resources."""
+        state['running'] = False
+        if state['after_id']:
+            try:
+                PREVIEW.after_cancel(state['after_id'])
+            except:
+                pass
+
+        shutdown_event.set()
+        swap_queue.put(None)
+        enhance_queue.put(None)
+        swap_thread.join(timeout=1.0)
+        enhance_thread.join(timeout=1.0)
+        cap.release()
+        PREVIEW.withdraw()
+
+    def on_preview_close():
+        """Handle preview window close."""
+        state['running'] = False
+
+    # Bind close event
+    PREVIEW.protocol("WM_DELETE_WINDOW", on_preview_close)
+
+    # Start the non-blocking update loop
+    update_frame()
 
 
-def create_source_target_popup_for_webcam(
-        root: ctk.CTk, map: list, camera_index: int
-) -> None:
+def create_source_target_popup_for_webcam(root: ctk.CTk, map: list, camera_index: int) -> None:
     global POPUP_LIVE, popup_status_label_live
 
+    # Create popup without grab_set since file dialogs need to work
     POPUP_LIVE = ctk.CTkToplevel(root)
-    POPUP_LIVE.title(_("Source x Target Mapper"))
-    POPUP_LIVE.geometry(f"{POPUP_LIVE_WIDTH}x{POPUP_LIVE_HEIGHT}")
-    POPUP_LIVE.focus()
+    POPUP_LIVE.title("Source ↔ Target Mapper (Live)")
+    POPUP_LIVE.geometry("800x650")
+    POPUP_LIVE.transient(root)
+    POPUP_LIVE.focus_force()
+    POPUP_LIVE.lift()
 
-    def on_submit_click():
+    # Center on parent
+    POPUP_LIVE.update_idletasks()
+    x = root.winfo_x() + (root.winfo_width() - 800) // 2
+    y = root.winfo_y() + (root.winfo_height() - 650) // 2
+    POPUP_LIVE.geometry(f"+{x}+{y}")
+
+    def on_submit():
         if has_valid_map():
             simplify_maps()
-            update_pop_live_status("Mappings successfully submitted!")
-            create_webcam_preview(camera_index)  # Open the preview window
+            popup_status_label_live.configure(text="Mappings saved!", text_color="#28a745")
+            POPUP_LIVE.after(500, lambda: create_webcam_preview(camera_index))
         else:
-            update_pop_live_status("At least 1 source with target is required!")
+            popup_status_label_live.configure(text="At least 1 mapping required!", text_color="#dc3545")
 
-    def on_add_click():
+    def on_add():
         add_blank_map()
         refresh_data(map)
-        update_pop_live_status("Please provide mapping!")
+        update_pop_live_status("Added new mapping row")
 
-    def on_clear_click():
+    def on_clear():
         clear_source_target_images(map)
         refresh_data(map)
-        update_pop_live_status("All mappings cleared!")
+        update_pop_live_status("All mappings cleared")
 
-    popup_status_label_live = ctk.CTkLabel(POPUP_LIVE, text=None, justify="center")
-    popup_status_label_live.grid(row=1, column=0, pady=15)
+    # Status label at top
+    popup_status_label_live = ctk.CTkLabel(POPUP_LIVE, text="Select source & target images, then click Start Live")
+    popup_status_label_live.grid(row=0, column=0, pady=10, sticky="ew")
 
-    add_button = ctk.CTkButton(POPUP_LIVE, text=_("Add"), command=lambda: on_add_click())
-    add_button.place(relx=0.1, rely=0.92, relwidth=0.2, relheight=0.05)
+    # Add initial blank mapping so user sees the UI
+    if len(map) == 0:
+        add_blank_map()
 
-    clear_button = ctk.CTkButton(POPUP_LIVE, text=_("Clear"), command=lambda: on_clear_click())
-    clear_button.place(relx=0.4, rely=0.92, relwidth=0.2, relheight=0.05)
+    # Initial refresh to show mapping rows
+    refresh_data(map)
 
-    close_button = ctk.CTkButton(
-        POPUP_LIVE, text=_("Submit"), command=lambda: on_submit_click()
-    )
-    close_button.place(relx=0.7, rely=0.92, relwidth=0.2, relheight=0.05)
+    # Footer buttons
+    button_frame = ctk.CTkFrame(POPUP_LIVE, fg_color="transparent")
+    button_frame.grid(row=2, column=0, pady=10, sticky="ew")
 
+    ctk.CTkButton(button_frame, text="Add Mapping", width=120, command=on_add).pack(side="left", padx=20)
+    ctk.CTkButton(button_frame, text="Clear All", width=120, command=on_clear).pack(side="left", padx=20)
+    ctk.CTkButton(button_frame, text="Start Live", width=120, fg_color="#28a745", command=on_submit).pack(side="left", padx=20)
+
+    # Configure grid weights
+    POPUP_LIVE.grid_columnconfigure(0, weight=1)
 
 
 def clear_source_target_images(map: list):
@@ -1329,194 +1134,178 @@ def clear_source_target_images(map: list):
         if "target" in item:
             del item["target"]
 
-    for button_num in list(source_label_dict_live.keys()):
-        source_label_dict_live[button_num].destroy()
-        del source_label_dict_live[button_num]
+    for key in list(source_label_dict_live.keys()):
+        source_label_dict_live[key].destroy()
+        del source_label_dict_live[key]
 
-    for button_num in list(target_label_dict_live.keys()):
-        target_label_dict_live[button_num].destroy()
-        del target_label_dict_live[button_num]
+    for key in list(target_label_dict_live.keys()):
+        target_label_dict_live[key].destroy()
+        del target_label_dict_live[key]
 
 
 def refresh_data(map: list):
-    global POPUP_LIVE
+    """Refresh the mapping UI - creates a new scrollable frame each time (original approach)."""
+    global POPUP_LIVE, source_label_dict_live, target_label_dict_live
 
-    scrollable_frame = ctk.CTkScrollableFrame(
-        POPUP_LIVE, width=POPUP_LIVE_SCROLL_WIDTH, height=POPUP_LIVE_SCROLL_HEIGHT
-    )
-    scrollable_frame.grid(row=0, column=0, padx=0, pady=0, sticky="nsew")
+    if not POPUP_LIVE or not POPUP_LIVE.winfo_exists():
+        return
 
-    def on_sbutton_click(map, button_num):
-        map = update_webcam_source(scrollable_frame, map, button_num)
+    # Create a new scrollable frame (this replaces any existing one)
+    scrollable_frame = ctk.CTkScrollableFrame(POPUP_LIVE, width=760, height=480)
+    scrollable_frame.grid(row=1, column=0, padx=10, pady=5, sticky="nsew")
 
-    def on_tbutton_click(map, button_num):
-        map = update_webcam_target(scrollable_frame, map, button_num)
+    def on_source_click(map, id):
+        update_webcam_source(scrollable_frame, map, id)
 
+    def on_target_click(map, id):
+        update_webcam_target(scrollable_frame, map, id)
+
+    # Create a row for each mapping
     for item in map:
         id = item["id"]
 
-        button = ctk.CTkButton(
+        # Source button (column 0)
+        ctk.CTkButton(
             scrollable_frame,
-            text=_("Select source image"),
-            command=lambda id=id: on_sbutton_click(map, id),
-            width=DEFAULT_BUTTON_WIDTH,
-            height=DEFAULT_BUTTON_HEIGHT,
-        )
-        button.grid(row=id, column=0, padx=30, pady=10)
+            text="Select Source",
+            command=lambda id=id: on_source_click(map, id),
+            width=140,
+            height=32,
+        ).grid(row=id, column=0, padx=10, pady=10)
 
-        x_label = ctk.CTkLabel(
-            scrollable_frame,
-            text=f"X",
-            width=MAPPER_PREVIEW_MAX_WIDTH,
-            height=MAPPER_PREVIEW_MAX_HEIGHT,
-        )
-        x_label.grid(row=id, column=2, padx=10, pady=10)
-
-        button = ctk.CTkButton(
-            scrollable_frame,
-            text=_("Select target image"),
-            command=lambda id=id: on_tbutton_click(map, id),
-            width=DEFAULT_BUTTON_WIDTH,
-            height=DEFAULT_BUTTON_HEIGHT,
-        )
-        button.grid(row=id, column=3, padx=20, pady=10)
-
+        # Source image preview (column 1)
         if "source" in item:
-            image = Image.fromarray(
-                cv2.cvtColor(item["source"]["cv2"], cv2.COLOR_BGR2RGB)
-            )
-            image = image.resize(
-                (MAPPER_PREVIEW_MAX_WIDTH, MAPPER_PREVIEW_MAX_HEIGHT), Image.LANCZOS
-            )
-            tk_image = ctk.CTkImage(image, size=image.size)
+            src_img = Image.fromarray(cv2.cvtColor(item["source"]["cv2"], cv2.COLOR_BGR2RGB))
+            src_img = src_img.resize((75, 75), Image.LANCZOS)
+            src_ctk = ctk.CTkImage(src_img, size=(75, 75))
+            src_label = ctk.CTkLabel(scrollable_frame, image=src_ctk, text="")
+            src_label.grid(row=id, column=1, padx=10, pady=10)
+            source_label_dict_live[id] = src_label
 
-            source_image = ctk.CTkLabel(
-                scrollable_frame,
-                text=f"S-{id}",
-                width=MAPPER_PREVIEW_MAX_WIDTH,
-                height=MAPPER_PREVIEW_MAX_HEIGHT,
-            )
-            source_image.grid(row=id, column=1, padx=10, pady=10)
-            source_image.configure(image=tk_image)
+        # Arrow (column 2)
+        ctk.CTkLabel(
+            scrollable_frame,
+            text="→",
+            font=("", 20),
+            width=40,
+        ).grid(row=id, column=2, padx=5, pady=10)
 
+        # Target button (column 3)
+        ctk.CTkButton(
+            scrollable_frame,
+            text="Select Target",
+            command=lambda id=id: on_target_click(map, id),
+            width=140,
+            height=32,
+        ).grid(row=id, column=3, padx=10, pady=10)
+
+        # Target image preview (column 4)
         if "target" in item:
-            image = Image.fromarray(
-                cv2.cvtColor(item["target"]["cv2"], cv2.COLOR_BGR2RGB)
-            )
-            image = image.resize(
-                (MAPPER_PREVIEW_MAX_WIDTH, MAPPER_PREVIEW_MAX_HEIGHT), Image.LANCZOS
-            )
-            tk_image = ctk.CTkImage(image, size=image.size)
-
-            target_image = ctk.CTkLabel(
-                scrollable_frame,
-                text=f"T-{id}",
-                width=MAPPER_PREVIEW_MAX_WIDTH,
-                height=MAPPER_PREVIEW_MAX_HEIGHT,
-            )
-            target_image.grid(row=id, column=4, padx=20, pady=10)
-            target_image.configure(image=tk_image)
+            tgt_img = Image.fromarray(cv2.cvtColor(item["target"]["cv2"], cv2.COLOR_BGR2RGB))
+            tgt_img = tgt_img.resize((75, 75), Image.LANCZOS)
+            tgt_ctk = ctk.CTkImage(tgt_img, size=(75, 75))
+            tgt_label = ctk.CTkLabel(scrollable_frame, image=tgt_ctk, text="")
+            tgt_label.grid(row=id, column=4, padx=10, pady=10)
+            target_label_dict_live[id] = tgt_label
 
 
-def update_webcam_source(
-        scrollable_frame: ctk.CTkScrollableFrame, map: list, button_num: int
-) -> list:
-    global source_label_dict_live
+def update_webcam_source(scrollable, map, item_id):
+    global source_label_dict_live, RECENT_DIRECTORY_SOURCE, POPUP_LIVE
+
+    # Find item by ID
+    item = next((x for x in map if x["id"] == item_id), None)
+    if item is None:
+        return map
+
+    # Remove old source if exists
+    if "source" in item:
+        item.pop("source")
+        if item_id in source_label_dict_live:
+            source_label_dict_live[item_id].destroy()
+            del source_label_dict_live[item_id]
 
     source_path = ctk.filedialog.askopenfilename(
-        title=_("select an source image"),
+        title="Select source image",
         initialdir=RECENT_DIRECTORY_SOURCE,
         filetypes=[img_ft],
     )
 
-    if "source" in map[button_num]:
-        map[button_num].pop("source")
-        source_label_dict_live[button_num].destroy()
-        del source_label_dict_live[button_num]
-
-    if source_path == "":
+    if not source_path:
         return map
+
+    RECENT_DIRECTORY_SOURCE = os.path.dirname(source_path)
+    cv2_img = cv2.imread(source_path)
+    face = get_one_face(cv2_img)
+
+    if face:
+        x_min, y_min, x_max, y_max = face["bbox"]
+        item["source"] = {
+            "cv2": cv2_img[int(y_min):int(y_max), int(x_min):int(x_max)],
+            "face": face,
+        }
+
+        # Create and display the source image preview
+        src_img = Image.fromarray(cv2.cvtColor(item["source"]["cv2"], cv2.COLOR_BGR2RGB))
+        src_img = src_img.resize((75, 75), Image.LANCZOS)
+        src_ctk = ctk.CTkImage(src_img, size=(75, 75))
+
+        src_label = ctk.CTkLabel(scrollable, image=src_ctk, text="")
+        src_label.grid(row=item_id, column=1, padx=10, pady=10)
+        source_label_dict_live[item_id] = src_label
+
+        update_pop_live_status("Source face added!")
     else:
-        cv2_img = cv2.imread(source_path)
-        face = get_one_face(cv2_img)
+        update_pop_live_status("No face detected in source image!")
 
-        if face:
-            x_min, y_min, x_max, y_max = face["bbox"]
+    return map
 
-            map[button_num]["source"] = {
-                "cv2": cv2_img[int(y_min): int(y_max), int(x_min): int(x_max)],
-                "face": face,
-            }
 
-            image = Image.fromarray(
-                cv2.cvtColor(map[button_num]["source"]["cv2"], cv2.COLOR_BGR2RGB)
-            )
-            image = image.resize(
-                (MAPPER_PREVIEW_MAX_WIDTH, MAPPER_PREVIEW_MAX_HEIGHT), Image.LANCZOS
-            )
-            tk_image = ctk.CTkImage(image, size=image.size)
+def update_webcam_target(scrollable, map, item_id):
+    global target_label_dict_live, RECENT_DIRECTORY_SOURCE, POPUP_LIVE
 
-            source_image = ctk.CTkLabel(
-                scrollable_frame,
-                text=f"S-{button_num}",
-                width=MAPPER_PREVIEW_MAX_WIDTH,
-                height=MAPPER_PREVIEW_MAX_HEIGHT,
-            )
-            source_image.grid(row=button_num, column=1, padx=10, pady=10)
-            source_image.configure(image=tk_image)
-            source_label_dict_live[button_num] = source_image
-        else:
-            update_pop_live_status("Face could not be detected in last upload!")
+    # Find item by ID
+    item = next((x for x in map if x["id"] == item_id), None)
+    if item is None:
         return map
 
-
-def update_webcam_target(
-        scrollable_frame: ctk.CTkScrollableFrame, map: list, button_num: int
-) -> list:
-    global target_label_dict_live
+    # Remove old target if exists
+    if "target" in item:
+        item.pop("target")
+        if item_id in target_label_dict_live:
+            target_label_dict_live[item_id].destroy()
+            del target_label_dict_live[item_id]
 
     target_path = ctk.filedialog.askopenfilename(
-        title=_("select an target image"),
+        title="Select target image",
         initialdir=RECENT_DIRECTORY_SOURCE,
         filetypes=[img_ft],
     )
 
-    if "target" in map[button_num]:
-        map[button_num].pop("target")
-        target_label_dict_live[button_num].destroy()
-        del target_label_dict_live[button_num]
-
-    if target_path == "":
+    if not target_path:
         return map
+
+    RECENT_DIRECTORY_SOURCE = os.path.dirname(target_path)
+    cv2_img = cv2.imread(target_path)
+    face = get_one_face(cv2_img)
+
+    if face:
+        x_min, y_min, x_max, y_max = face["bbox"]
+        item["target"] = {
+            "cv2": cv2_img[int(y_min):int(y_max), int(x_min):int(x_max)],
+            "face": face,
+        }
+
+        # Create and display the target image preview
+        tgt_img = Image.fromarray(cv2.cvtColor(item["target"]["cv2"], cv2.COLOR_BGR2RGB))
+        tgt_img = tgt_img.resize((75, 75), Image.LANCZOS)
+        tgt_ctk = ctk.CTkImage(tgt_img, size=(75, 75))
+
+        tgt_label = ctk.CTkLabel(scrollable, image=tgt_ctk, text="")
+        tgt_label.grid(row=item_id, column=4, padx=10, pady=10)
+        target_label_dict_live[item_id] = tgt_label
+
+        update_pop_live_status("Target face added!")
     else:
-        cv2_img = cv2.imread(target_path)
-        face = get_one_face(cv2_img)
+        update_pop_live_status("No face detected in target image!")
 
-        if face:
-            x_min, y_min, x_max, y_max = face["bbox"]
-
-            map[button_num]["target"] = {
-                "cv2": cv2_img[int(y_min): int(y_max), int(x_min): int(x_max)],
-                "face": face,
-            }
-
-            image = Image.fromarray(
-                cv2.cvtColor(map[button_num]["target"]["cv2"], cv2.COLOR_BGR2RGB)
-            )
-            image = image.resize(
-                (MAPPER_PREVIEW_MAX_WIDTH, MAPPER_PREVIEW_MAX_HEIGHT), Image.LANCZOS
-            )
-            tk_image = ctk.CTkImage(image, size=image.size)
-
-            target_image = ctk.CTkLabel(
-                scrollable_frame,
-                text=f"T-{button_num}",
-                width=MAPPER_PREVIEW_MAX_WIDTH,
-                height=MAPPER_PREVIEW_MAX_HEIGHT,
-            )
-            target_image.grid(row=button_num, column=4, padx=20, pady=10)
-            target_image.configure(image=tk_image)
-            target_label_dict_live[button_num] = target_image
-        else:
-            update_pop_live_status("Face could not be detected in last upload!")
-        return map
+    return map
