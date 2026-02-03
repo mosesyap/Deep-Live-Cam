@@ -19,12 +19,40 @@ def get_face_analyser() -> Any:
     global FACE_ANALYSER
 
     if FACE_ANALYSER is None:
-        FACE_ANALYSER = insightface.app.FaceAnalysis(name='buffalo_l', providers=modules.globals.execution_providers)
-        FACE_ANALYSER.prepare(ctx_id=0, det_size=(640, 640))
+        # Configure TensorRT if available
+        providers_config = []
+        for p in modules.globals.execution_providers:
+            if p == "TensorrtExecutionProvider":
+                providers_config.append((
+                    "TensorrtExecutionProvider",
+                    {
+                        "device_id": 0,
+                        "trt_fp16_enable": True,
+                        "trt_engine_cache_enable": True,
+                    }
+                ))
+            elif p == "CUDAExecutionProvider":
+                providers_config.append((
+                    "CUDAExecutionProvider",
+                    {"device_id": 0}
+                ))
+            else:
+                providers_config.append(p)
+
+        FACE_ANALYSER = insightface.app.FaceAnalysis(
+            name='buffalo_l',
+            providers=providers_config if providers_config else modules.globals.execution_providers
+        )
+        det_size = getattr(modules.globals, 'det_size', (320, 320))
+        FACE_ANALYSER.prepare(ctx_id=0, det_size=det_size)
+        print(f"[INFO] Face analyser initialized with det_size={det_size}")
     return FACE_ANALYSER
 
 
 def get_one_face(frame: Frame) -> Any:
+    # Convert RGBA to RGB if needed
+    if frame is not None and len(frame.shape) == 3 and frame.shape[2] == 4:
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
     face = get_face_analyser().get(frame)
     try:
         return min(face, key=lambda x: x.bbox[0])
@@ -34,6 +62,9 @@ def get_one_face(frame: Frame) -> Any:
 
 def get_many_faces(frame: Frame) -> Any:
     try:
+        # Convert RGBA to RGB if needed
+        if frame is not None and len(frame.shape) == 3 and frame.shape[2] == 4:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
         return get_face_analyser().get(frame)
     except IndexError:
         return None

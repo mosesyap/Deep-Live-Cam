@@ -48,9 +48,16 @@ execution_providers: List[str] = []  # e.g., ['CUDAExecutionProvider', 'CPUExecu
 execution_threads: int | None = None # Number of threads for CPU execution
 headless: bool | None = None         # Run without UI?
 log_level: str = "error"             # Logging level (e.g., 'debug', 'info', 'warning', 'error')
+det_size: tuple = (320, 320)         # Face detection resolution (smaller = faster, 320x320 or 640x640)
 
 # Face Processor UI Toggles (Example)
 fp_ui: Dict[str, bool] = {"face_enhancer": False}
+
+# Face Enhancer Options
+enhance_scale: float = 0.5  # Processing scale (0.5 = half res for speed, 1.0 = full quality)
+enhancer_type: str = "gfpgan_onnx"  # Enhancer: "gfpgan_onnx" (~80-120ms, recommended), "codeformer" (~80-120ms), "gfpgan" (~230ms), "gpen" (~50-100ms), "fast" (~5ms), "none"
+enhancer_blend: float = 0.8  # Blend factor for enhanced face (0.0-1.0, FaceFusion default is 0.8)
+use_fp16: bool = True  # Use FP16 precision for faster inference (RTX 4090 is ~2x faster with FP16)
 
 # Face Swapper Specific Options
 face_swapper_enabled: bool = True # General toggle for the swapper processor

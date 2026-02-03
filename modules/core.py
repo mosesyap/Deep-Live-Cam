@@ -5,6 +5,14 @@ if any(arg.startswith('--execution-provider') for arg in sys.argv):
     os.environ['OMP_NUM_THREADS'] = '1'
 # reduce tensorflow log level
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+# Add TensorRT libs to PATH if available
+import site
+for site_path in site.getsitepackages():
+    tensorrt_libs_path = os.path.join(site_path, 'tensorrt_libs')
+    if os.path.exists(tensorrt_libs_path):
+        os.environ['PATH'] = tensorrt_libs_path + os.pathsep + os.environ.get('PATH', '')
+        break
 import warnings
 from typing import List
 import platform

@@ -1,6 +1,7 @@
 from typing import Any, List, Optional
 import cv2
 import insightface
+import onnxruntime
 import threading
 import numpy as np
 import platform
@@ -74,39 +75,64 @@ def get_face_swapper() -> Any:
 
     with THREAD_LOCK:
         if FACE_SWAPPER is None:
+            # Use full precision model for quality
             model_name = "inswapper_128.onnx"
-            if "CUDAExecutionProvider" in modules.globals.execution_providers:
-                model_name = "inswapper_128_fp16.onnx"
             model_path = os.path.join(models_dir, model_name)
             update_status(f"Loading face swapper model from: {model_path}", NAME)
             try:
-                # Optimized provider configuration for Apple Silicon
+                # Get FP16 setting from globals
+                use_fp16 = getattr(modules.globals, 'use_fp16', True)
+                trt_cache_path = os.path.join(models_dir, "trt_cache")
+                os.makedirs(trt_cache_path, exist_ok=True)
+
+                # Configure providers - always try TensorRT first for best performance
                 providers_config = []
-                for p in modules.globals.execution_providers:
-                    if p == "CoreMLExecutionProvider" and IS_APPLE_SILICON:
-                        # Enhanced CoreML configuration for M1-M5
-                        providers_config.append((
-                            "CoreMLExecutionProvider",
-                            {
-                                "ModelFormat": "MLProgram",
-                                "MLComputeUnits": "ALL",  # Use Neural Engine + GPU + CPU
-                                "SpecializationStrategy": "FastPrediction",
-                                "AllowLowPrecisionAccumulationOnGPU": 1,
-                                "EnableOnSubgraphs": 1,
-                                "RequireStaticShapes": 0,
-                                "MaximumCacheSize": 1024 * 1024 * 512,  # 512MB cache
-                            }
-                        ))
-                    else:
-                        providers_config.append(p)
-                
+                available_providers = onnxruntime.get_available_providers()
+
+                # Priority 1: TensorRT (fastest, 30-50% speedup)
+                if 'TensorrtExecutionProvider' in available_providers:
+                    providers_config.append((
+                        "TensorrtExecutionProvider",
+                        {
+                            "device_id": 0,
+                            "trt_max_workspace_size": 2 * 1024 * 1024 * 1024,  # 2GB
+                            "trt_fp16_enable": use_fp16,
+                            "trt_engine_cache_enable": True,
+                            "trt_engine_cache_path": trt_cache_path,
+                            "trt_timing_cache_enable": True,
+                            "trt_timing_cache_path": trt_cache_path,
+                        }
+                    ))
+                    print(f"[INFO] TensorRT enabled for face swapper (FP16={use_fp16})")
+
+                # Priority 2: CUDA
+                if 'CUDAExecutionProvider' in available_providers:
+                    providers_config.append((
+                        "CUDAExecutionProvider",
+                        {
+                            "device_id": 0,
+                            "arena_extend_strategy": "kSameAsRequested",
+                            "cudnn_conv_algo_search": "HEURISTIC",
+                        }
+                    ))
+
+                # Fallback: CPU
+                providers_config.append("CPUExecutionProvider")
+
+                print(f"[INFO] Loading face swapper with providers: {[p[0] if isinstance(p, tuple) else p for p in providers_config]}")
+                print(f"[INFO] TensorRT engine cache path: {trt_cache_path}")
+                print(f"[INFO] First run with TensorRT may take 1-2 min to compile engine...")
+
                 FACE_SWAPPER = insightface.model_zoo.get_model(
                     model_path,
                     providers=providers_config,
                 )
+                print(f"[INFO] Face swapper loaded successfully!")
                 update_status("Face swapper model loaded successfully.", NAME)
             except Exception as e:
                 update_status(f"Error loading face swapper model: {e}", NAME)
+                import traceback
+                traceback.print_exc()
                 FACE_SWAPPER = None
                 return None
     return FACE_SWAPPER
@@ -368,6 +394,8 @@ def process_frame(source_face: Face, temp_frame: Frame) -> Frame:
     DEPRECATED / SIMPLER VERSION - Processes a single frame using one source face.
     Consider using process_frame_v2 for more complex scenarios.
     """
+    if source_face is None:
+        return temp_frame
     if getattr(modules.globals, "opacity", 1.0) == 0:
         # If opacity is 0, no swap happens, so no post-processing needed.
         # Also reset interpolation state if it was active.
@@ -1090,7 +1118,7 @@ def create_face_mask(face: Face, frame: Frame) -> np.ndarray:
         # Calculate convex hull of these points
         # Use try-except as convexHull can fail on degenerate input
         try:
-             hull = cv2.convexHull(full_face_poly.astype(np.float32)) # Use float for accuracy
+             hull = cv2.convexHull(face_outline_points.astype(np.float32)) # Use float for accuracy
              if hull is None or len(hull) < 3:
                  # print("Warning: Convex hull calculation failed or returned too few points.")
                  # Fallback: use bounding box of landmarks? Or just return empty mask?

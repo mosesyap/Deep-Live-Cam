@@ -7,6 +7,9 @@ from cv2_enumerate_cameras import enumerate_cameras  # Add this import
 from PIL import Image, ImageOps
 import time
 import json
+import threading
+import queue
+import torch
 import modules.globals
 import modules.metadata
 from modules.face_analyser import (
@@ -217,6 +220,70 @@ def create_root(start: Callable[[], None], destroy: Callable[[], None]) -> ctk.C
     )
     enhancer_switch.place(relx=0.1, rely=0.6)
 
+    # Enhancer type selector
+    # GFPGAN_ONNX ~80-120ms (FaceFusion's default), CodeFormer ~80-120ms
+    # GFPGAN ~230ms (PyTorch), GPEN ~50-100ms (ONNX), Fast ~5ms (CV-based)
+    def update_enhancer_type(choice):
+        type_map = {
+            "GFPGAN_ONNX": "gfpgan_onnx",
+            "CodeFormer": "codeformer",
+            "GFPGAN": "gfpgan",
+            "GPEN": "gpen",
+            "Fast": "fast",
+            "None": "none",
+        }
+        modules.globals.enhancer_type = type_map.get(choice, "gfpgan_onnx")
+        print(f"[UI] Enhancer type set to: {modules.globals.enhancer_type}")
+
+    enhancer_type_label = ctk.CTkLabel(root, text="Enhancer:")
+    enhancer_type_label.place(relx=0.1, rely=0.65)
+
+    enhancer_type_dropdown = ctk.CTkOptionMenu(
+        root,
+        values=["GFPGAN_ONNX", "CodeFormer", "GFPGAN", "GPEN", "Fast", "None"],
+        command=update_enhancer_type,
+    )
+    # Set initial value based on globals
+    current_type = getattr(modules.globals, 'enhancer_type', 'gfpgan_onnx')
+    type_display_map = {
+        "gfpgan_onnx": "GFPGAN_ONNX",
+        "codeformer": "CodeFormer",
+        "gfpgan": "GFPGAN",
+        "gpen": "GPEN",
+        "fast": "Fast",
+        "none": "None",
+    }
+    enhancer_type_dropdown.set(type_display_map.get(current_type, "GFPGAN_ONNX"))
+    enhancer_type_dropdown.place(relx=0.22, rely=0.65, relwidth=0.2)
+
+    # Blend slider for face enhancement (0.0-1.0)
+    def update_blend(value):
+        modules.globals.enhancer_blend = float(value)
+
+    blend_label = ctk.CTkLabel(root, text="Blend:")
+    blend_label.place(relx=0.44, rely=0.65)
+
+    blend_slider = ctk.CTkSlider(
+        root,
+        from_=0.0,
+        to=1.0,
+        number_of_steps=20,
+        command=update_blend,
+    )
+    blend_slider.set(getattr(modules.globals, 'enhancer_blend', 0.8))
+    blend_slider.place(relx=0.52, rely=0.65, relwidth=0.15)
+
+    # FP16 toggle for faster inference (requires restart to take effect)
+    fp16_value = ctk.BooleanVar(value=getattr(modules.globals, 'use_fp16', True))
+    fp16_switch = ctk.CTkSwitch(
+        root,
+        text="FP16",
+        variable=fp16_value,
+        cursor="hand2",
+        command=lambda: setattr(modules.globals, "use_fp16", fp16_value.get()),
+    )
+    fp16_switch.place(relx=0.7, rely=0.65)
+
     keep_audio_value = ctk.BooleanVar(value=modules.globals.keep_audio)
     keep_audio_switch = ctk.CTkSwitch(
         root,
@@ -272,7 +339,7 @@ def create_root(start: Callable[[], None], destroy: Callable[[], None]) -> ctk.C
             close_mapper_window() if not map_faces.get() else None
         ),
     )
-    map_faces_switch.place(relx=0.1, rely=0.65)
+    map_faces_switch.place(relx=0.1, rely=0.70)
 
     poisson_blend_value = ctk.BooleanVar(value=modules.globals.poisson_blend)
     poisson_blend_switch = ctk.CTkSwitch(
@@ -285,7 +352,7 @@ def create_root(start: Callable[[], None], destroy: Callable[[], None]) -> ctk.C
             save_switch_states(),
         ),
     )
-    poisson_blend_switch.place(relx=0.1, rely=0.7)
+    poisson_blend_switch.place(relx=0.1, rely=0.75)
 
     show_fps_value = ctk.BooleanVar(value=modules.globals.show_fps)
     show_fps_switch = ctk.CTkSwitch(
@@ -948,6 +1015,13 @@ def get_available_cameras():
 
 
 def create_webcam_preview(camera_index: int):
+    """
+    Parallel GPU pipeline webcam preview.
+
+    Pipeline: [Capture] -> [Swap GPU0] -> [Enhance GPU1] -> [Display]
+
+    Uses double-buffering so GPU0 can process frame N+1 while GPU1 enhances frame N.
+    """
     global preview_label, PREVIEW
 
     cap = VideoCapturer(camera_index)
@@ -959,12 +1033,136 @@ def create_webcam_preview(camera_index: int):
     PREVIEW.deiconify()
 
     frame_processors = get_frame_processors_modules(modules.globals.frame_processors)
+
+    # Separate processors by type
+    swap_processor = None
+    enhance_processor = None
+    for fp in frame_processors:
+        if fp.NAME == "DLC.FACE-ENHANCER":
+            enhance_processor = fp
+        else:
+            swap_processor = fp
+
     source_image = None
     prev_time = time.time()
     fps_update_interval = 0.5
     frame_count = 0
-    fps = 0
+    processed_frame_count = 0  # Count of actual new processed frames
+    display_fps = 0
+    processed_fps = 0  # Actual FPS of new processed content
 
+    # Debug timing
+    debug_interval = 30
+    debug_count = 0
+    total_swap_time = 0
+    total_enhance_time = 0
+    total_display_time = 0
+
+    # Parallel processing state
+    from concurrent.futures import ThreadPoolExecutor
+
+    # Queues for pipeline stages
+    swap_queue = queue.Queue(maxsize=2)      # Frames waiting for swap
+    enhance_queue = queue.Queue(maxsize=2)    # Swapped frames waiting for enhance
+    display_queue = queue.Queue(maxsize=2)    # Enhanced frames ready for display
+
+    shutdown_event = threading.Event()
+
+    # Thread-local storage for CUDA context
+    swap_times = {'total': 0, 'count': 0}
+    enhance_times = {'total': 0, 'count': 0}
+
+    def swap_worker():
+        """Face swap worker - runs on GPU 0."""
+        nonlocal source_image
+
+        # Set CUDA device for this thread
+        if torch.cuda.is_available():
+            torch.cuda.set_device(0)
+
+        while not shutdown_event.is_set():
+            try:
+                frame_data = swap_queue.get(timeout=0.05)
+                if frame_data is None:
+                    break
+
+                temp_frame, use_map_faces = frame_data
+                t0 = time.perf_counter()
+
+                if swap_processor:
+                    if not use_map_faces:
+                        temp_frame = swap_processor.process_frame(source_image, temp_frame)
+                    else:
+                        temp_frame = swap_processor.process_frame_v2(temp_frame)
+
+                swap_times['total'] += time.perf_counter() - t0
+                swap_times['count'] += 1
+
+                # Pass to enhance stage
+                try:
+                    enhance_queue.put_nowait(temp_frame)
+                except queue.Full:
+                    try:
+                        enhance_queue.get_nowait()
+                        enhance_queue.put_nowait(temp_frame)
+                    except:
+                        pass
+
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"[SWAP] Error: {e}")
+
+    def enhance_worker():
+        """Face enhance worker - runs on GPU 1."""
+        # Set CUDA device for this thread
+        if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            torch.cuda.set_device(1)
+
+        while not shutdown_event.is_set():
+            try:
+                temp_frame = enhance_queue.get(timeout=0.05)
+                if temp_frame is None:
+                    break
+
+                t0 = time.perf_counter()
+
+                if enhance_processor and modules.globals.fp_ui.get("face_enhancer", False):
+                    if not modules.globals.map_faces:
+                        temp_frame = enhance_processor.process_frame(None, temp_frame)
+                    else:
+                        temp_frame = enhance_processor.process_frame_v2(temp_frame)
+
+                enhance_times['total'] += time.perf_counter() - t0
+                enhance_times['count'] += 1
+
+                # Pass to display
+                try:
+                    display_queue.put_nowait(temp_frame)
+                except queue.Full:
+                    try:
+                        display_queue.get_nowait()
+                        display_queue.put_nowait(temp_frame)
+                    except:
+                        pass
+
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"[ENHANCE] Error: {e}")
+
+    # Start worker threads
+    swap_thread = threading.Thread(target=swap_worker, daemon=True)
+    enhance_thread = threading.Thread(target=enhance_worker, daemon=True)
+    swap_thread.start()
+    enhance_thread.start()
+
+    print("[PIPELINE] Started parallel GPU pipeline: Swap(GPU0) -> Enhance(GPU1)")
+
+    # Keep track of last processed frame
+    last_processed_frame = None
+
+    # Main loop: capture and display
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -975,47 +1173,57 @@ def create_webcam_preview(camera_index: int):
         if modules.globals.live_mirror:
             temp_frame = cv2.flip(temp_frame, 1)
 
-        if modules.globals.live_resizable:
-            temp_frame = fit_image_to_size(
-                temp_frame, PREVIEW.winfo_width(), PREVIEW.winfo_height()
-            )
+        temp_frame = fit_image_to_size(
+            temp_frame, PREVIEW.winfo_width(), PREVIEW.winfo_height()
+        )
 
+        # Load source image once
+        if source_image is None and modules.globals.source_path:
+            source_image = get_one_face(cv2.imread(modules.globals.source_path))
+
+        # Submit frame to swap queue
+        try:
+            swap_queue.put_nowait((temp_frame, modules.globals.map_faces))
+        except queue.Full:
+            try:
+                swap_queue.get_nowait()
+                swap_queue.put_nowait((temp_frame, modules.globals.map_faces))
+            except:
+                pass
+
+        # Try to get a processed frame for display
+        got_new_frame = False
+        try:
+            new_frame = display_queue.get_nowait()
+            last_processed_frame = new_frame
+            got_new_frame = True
+            processed_frame_count += 1  # Count actual new processed frames
+        except queue.Empty:
+            pass  # Keep showing last processed frame
+
+        # Determine what to display
+        if last_processed_frame is not None:
+            display_frame = last_processed_frame
         else:
-            temp_frame = fit_image_to_size(
-                temp_frame, PREVIEW.winfo_width(), PREVIEW.winfo_height()
-            )
+            # No processed frame yet, show raw frame with "Processing..." text
+            display_frame = temp_frame.copy()
+            cv2.putText(display_frame, "Processing...", (10, 60),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
 
-        if not modules.globals.map_faces:
-            if source_image is None and modules.globals.source_path:
-                source_image = get_one_face(cv2.imread(modules.globals.source_path))
-
-            for frame_processor in frame_processors:
-                if frame_processor.NAME == "DLC.FACE-ENHANCER":
-                    if modules.globals.fp_ui["face_enhancer"]:
-                        temp_frame = frame_processor.process_frame(None, temp_frame)
-                else:
-                    temp_frame = frame_processor.process_frame(source_image, temp_frame)
-        else:
-            modules.globals.target_path = None
-            for frame_processor in frame_processors:
-                if frame_processor.NAME == "DLC.FACE-ENHANCER":
-                    if modules.globals.fp_ui["face_enhancer"]:
-                        temp_frame = frame_processor.process_frame_v2(temp_frame)
-                else:
-                    temp_frame = frame_processor.process_frame_v2(temp_frame)
-
-        # Calculate and display FPS
+        # Calculate actual processed FPS (new frames per second)
         current_time = time.time()
         frame_count += 1
         if current_time - prev_time >= fps_update_interval:
-            fps = frame_count / (current_time - prev_time)
+            display_fps = frame_count / (current_time - prev_time)
+            processed_fps = processed_frame_count / (current_time - prev_time)
             frame_count = 0
+            processed_frame_count = 0
             prev_time = current_time
 
         if modules.globals.show_fps:
             cv2.putText(
-                temp_frame,
-                f"FPS: {fps:.1f}",
+                display_frame,
+                f"FPS: {processed_fps:.1f}",
                 (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 1,
@@ -1023,18 +1231,47 @@ def create_webcam_preview(camera_index: int):
                 2,
             )
 
-        image = cv2.cvtColor(temp_frame, cv2.COLOR_BGR2RGB)
-        image = Image.fromarray(image)
-        image = ImageOps.contain(
-            image, (temp_frame.shape[1], temp_frame.shape[0]), Image.LANCZOS
-        )
-        image = ctk.CTkImage(image, size=image.size)
-        preview_label.configure(image=image)
+        # Optimized display - minimize object creation
+        t0 = time.perf_counter()
+        # Convert BGR to RGB using numpy (faster than cv2.cvtColor for this case)
+        rgb_frame = display_frame[:, :, ::-1]
+        # Create PIL image directly from numpy array
+        image = Image.fromarray(rgb_frame)
+        # Create CTkImage with explicit size
+        ctk_image = ctk.CTkImage(light_image=image, size=(display_frame.shape[1], display_frame.shape[0]))
+        preview_label.configure(image=ctk_image)
+        # Use update_idletasks() instead of update() for less overhead
+        ROOT.update_idletasks()
         ROOT.update()
+        total_display_time += time.perf_counter() - t0
+
+        # Debug output
+        debug_count += 1
+        if debug_count >= debug_interval:
+            avg_swap = (swap_times['total'] / max(swap_times['count'], 1)) * 1000
+            avg_enhance = (enhance_times['total'] / max(enhance_times['count'], 1)) * 1000
+            avg_display = (total_display_time / debug_count) * 1000
+            print(f"[TIMING] Swap: {avg_swap:.1f}ms, Enhance: {avg_enhance:.1f}ms, Display: {avg_display:.1f}ms, ProcessedFPS: {processed_fps:.1f}")
+            debug_count = 0
+            total_display_time = 0
+            swap_times['total'] = 0
+            swap_times['count'] = 0
+            enhance_times['total'] = 0
+            enhance_times['count'] = 0
+
+            # Clear CUDA cache periodically
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         if PREVIEW.state() == "withdrawn":
             break
 
+    # Cleanup
+    shutdown_event.set()
+    swap_queue.put(None)
+    enhance_queue.put(None)
+    swap_thread.join(timeout=1.0)
+    enhance_thread.join(timeout=1.0)
     cap.release()
     PREVIEW.withdraw()
 
